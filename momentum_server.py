@@ -585,53 +585,218 @@ def calc_multifactor(prices, meta, start_str, end_str):
 # ─── 市场温度计 ───────────────────────────────────────────────────────────────
 
 def _safe_series(s):
-    """把 pd.Series 转成普通 list，NaN → None"""
     import numpy as np
     return [None if (v is None or (isinstance(v, float) and np.isnan(v))) else round(float(v), 4)
             for v in s]
 
 def _percentile_of(series, value):
-    """value 在 series 历史中的百分位（0-100）"""
     import numpy as np
     if value is None: return None
     arr = [v for v in series if v is not None]
     if not arr: return None
     return round(float(np.sum(np.array(arr) <= value) / len(arr) * 100), 1)
 
-def _fetch_market_data():
-    import yfinance as yf
-    import pandas as pd
-    import numpy as np
-    import requests as req
 
-    result = {}
+_market_cache = {"ts": 0, "data": None}
+_MARKET_TTL = 3600  # 1小时缓存
+
+# ─── 每个指标独立计算函数，供流式推送 ────────────────────────────────────────────
+
+def _ind_vix(ctx):
+    import pandas as pd
+    s = ctx["dl1"]("^VIX")
+    s60d = s[s.index >= ctx["start_60d"]]
+    chg = float(s.iloc[-1] - s.iloc[-2]) if len(s) > 1 else None
+    dates = [str(d.date()) for d in s60d.index]
+    return ctx["mk"](s.iloc[-1], chg, s, s60d, dates60d=dates)
+
+def _ind_put_call(ctx):
+    import re as _re, requests as req
+    pc_r = req.get("https://www.cboe.com/us/options/market_statistics/daily/",
+                   headers=_HEADERS, timeout=10)
+    pc_matches = dict(_re.findall(
+        r'\{\\"name\\":\\"([^"\\\\]+PUT/CALL[^"\\\\]*)\\"[^}]*\\"value\\":\\"([^"\\\\]+)\\"',
+        pc_r.text, _re.IGNORECASE))
+    total_pc  = _safe(float(pc_matches["TOTAL PUT/CALL RATIO"]))  if "TOTAL PUT/CALL RATIO"  in pc_matches else None
+    equity_pc = _safe(float(pc_matches["EQUITY PUT/CALL RATIO"])) if "EQUITY PUT/CALL RATIO" in pc_matches else None
+    index_pc  = _safe(float(pc_matches["INDEX PUT/CALL RATIO"]))  if "INDEX PUT/CALL RATIO"  in pc_matches else None
+    val = equity_pc or total_pc
+    hist_ref = [0.35,0.40,0.45,0.50,0.55,0.60,0.65,0.70,0.75,0.80,0.85,0.90,0.95,1.00,1.10,1.20]
+    return {
+        "value": round(val, 2) if val else None, "change": None,
+        "percentile": _percentile_of(hist_ref, val) if val else None,
+        "history": [], "dates": [],
+        "note_extra": f"Total {total_pc}  ·  Equity {equity_pc}  ·  Index {index_pc}",
+    }
+
+def _ind_aaii_bull(ctx):
+    import pandas as pd
+    iwm = ctx["dl1"]("IWM"); spy = ctx["dl1"]("SPY")
+    idx = iwm.index.intersection(spy.index)
+    ratio = (iwm[idx] / spy[idx]).dropna()
+    pct = ratio.rank(pct=True) * 100
+    s60d = pct[pct.index >= ctx["start_60d"]]
+    val = float(pct.iloc[-1])
+    chg = float(pct.iloc[-1] - pct.iloc[-2]) if len(pct) > 1 else None
+    return ctx["mk"](val, chg, pct, s60d, rnd=1)
+
+def _ind_ad_ratio(ctx):
+    import pandas as pd
+    rsp = ctx["dl1"]("RSP"); spy = ctx["dl1"]("SPY")
+    idx = rsp.index.intersection(spy.index)
+    ratio = (rsp[idx] / spy[idx]).dropna()
+    ma5 = ratio.rolling(5).mean().dropna()
+    s60d = ma5[ma5.index >= ctx["start_60d"]]
+    chg = float(ma5.iloc[-1] - ma5.iloc[-2]) if len(ma5) > 1 else None
+    return ctx["mk"](ma5.iloc[-1], chg, ma5, s60d, rnd=4)
+
+def _ind_mcclell(ctx):
+    import pandas as pd
+    rsp = ctx["dl1"]("RSP"); spy = ctx["dl1"]("SPY")
+    idx = rsp.index.intersection(spy.index)
+    net = (rsp[idx] - spy[idx] * (rsp[idx].iloc[0] / spy[idx].iloc[0])).dropna()
+    ema19 = net.ewm(span=19, adjust=False).mean()
+    ema39 = net.ewm(span=39, adjust=False).mean()
+    mcl = (ema19 - ema39).dropna()
+    s60d = mcl[mcl.index >= ctx["start_60d"]]
+    chg = float(mcl.iloc[-1] - mcl.iloc[-2]) if len(mcl) > 1 else None
+    return ctx["mk"](mcl.iloc[-1], chg, mcl, s60d, rnd=2)
+
+def _ind_nh_nl(ctx):
+    import pandas as pd
+    qqq = ctx["dl1"]("QQQ"); iwm = ctx["dl1"]("IWM")
+    idx = qqq.index.intersection(iwm.index)
+    hi52_qqq = qqq[idx].rolling(252).max()
+    hi52_iwm = iwm[idx].rolling(252).max()
+    ratio = ((qqq[idx]/hi52_qqq) / (iwm[idx]/hi52_iwm)).dropna()
+    s60d = ratio[ratio.index >= ctx["start_60d"]]
+    chg = float(ratio.iloc[-1] - ratio.iloc[-2]) if len(ratio) > 1 else None
+    return ctx["mk"](ratio.iloc[-1], chg, ratio, s60d, rnd=3)
+
+def _ind_ndx_pe(ctx):
+    import yfinance as yf
+    pe = _safe(yf.Ticker("QQQ").info.get("trailingPE"))
+    hist_ref = [15,18,20,22,24,26,28,30,32,35,38,40,42,45]
+    return {
+        "value": round(float(pe), 1) if pe else None, "change": None,
+        "percentile": _percentile_of(hist_ref, pe) if pe else None,
+        "history": [],
+    }
+
+def _ind_cape(ctx):
+    import pandas as pd
+    df = pd.read_excel("http://www.econ.yale.edu/~shiller/data/ie_data.xls",
+                       sheet_name="Data", skiprows=7, engine="xlrd")
+    cape = pd.to_numeric(df["CAPE"], errors="coerce").dropna().tail(300).tolist()
+    val = cape[-1] if cape else None
+    return {
+        "value": round(float(val), 1) if val else None, "change": None,
+        "percentile": _percentile_of([round(v,1) for v in cape], val) if val else None,
+        "history": [round(v,1) for v in cape[-24:]],
+    }
+
+def _ind_yield_spread(ctx):
+    s2y, s60d, dates = ctx["fred"]("T10Y2Y")
+    chg = float(s2y.iloc[-1] - s2y.iloc[-2]) if len(s2y) > 1 else None
+    return ctx["mk"](s2y.iloc[-1], chg, s2y, s60d, rnd=2, dates60d=dates)
+
+def _ind_pct200(ctx):
+    import pandas as pd
+    scores = {}
+    for t in ["SPY","QQQ","IWM","DIA","MDY"]:
+        try:
+            s = ctx["dl1"](t)
+            ma200 = s.rolling(200).mean()
+            above = (s > ma200).astype(float).rolling(20).mean().dropna()
+            scores[t] = above
+        except: pass
+    if not scores: return {}
+    combined = pd.concat(scores.values(), axis=1).mean(axis=1).dropna() * 100
+    s60d = combined[combined.index >= ctx["start_60d"]]
+    chg = float(combined.iloc[-1] - combined.iloc[-2]) if len(combined) > 1 else None
+    return ctx["mk"](combined.iloc[-1], chg, combined, s60d, rnd=1)
+
+def _ind_qqq_flow(ctx):
+    import yfinance as yf, pandas as pd
+    raw = yf.download("QQQ", start=ctx["start_60d"], auto_adjust=True, progress=False)
+    prices = raw["Close"].dropna()
+    volume = raw["Volume"].dropna()
+    if hasattr(prices,"ndim") and prices.ndim==2: prices=prices.iloc[:,0]
+    if hasattr(volume,"ndim") and volume.ndim==2: volume=volume.iloc[:,0]
+    flow = (prices * volume / 1e8).dropna()
+    flow3 = flow.rolling(3).sum().dropna()
+    chg = float(flow3.iloc[-1] - flow3.iloc[-2]) if len(flow3) > 1 else None
+    return ctx["mk"](flow3.iloc[-1], chg, flow3, flow3, rnd=1)
+
+def _ind_hy_spread(ctx):
+    import numpy as np
+    s2y, s60d, dates = ctx["fred"]("BAMLH0A0HYM2")
+    val_bps = float(s2y.iloc[-1]) * 100
+    chg_bps = float(s2y.iloc[-1] - s2y.iloc[-2]) * 100 if len(s2y) > 1 else None
+    h2_bps  = [v*100 for v in s2y.tolist()]
+    h60_bps = [v*100 for v in s60d.tolist()]
+    return {
+        "value": round(val_bps, 0), "change": round(chg_bps, 0) if chg_bps else None,
+        "percentile": _percentile_of(h2_bps, val_bps),
+        "history": [round(v, 0) for v in h60_bps],
+        "dates": dates,
+    }
+
+def _ind_margin_debt(ctx):
+    s2y, s60d, dates = ctx["fred"]("BOGMBBM")
+    val = float(s2y.iloc[-1]) * 10
+    chg = float(s2y.iloc[-1] - s2y.iloc[-2]) * 10 if len(s2y) > 1 else None
+    h2  = [v*10 for v in s2y.tolist()]
+    h60 = [v*10 for v in s60d.tolist()]
+    return {
+        "value": round(val, 0), "change": round(chg, 0) if chg else None,
+        "percentile": _percentile_of(h2, val),
+        "history": [round(v, 0) for v in h60],
+        "dates": dates,
+    }
+
+# 顺序 & 权重（weight 用于温度计加权，proxy=True 表示代理指标）
+_MARKET_INDICATORS = [
+    ("vix",          _ind_vix,          3.0, False),
+    ("put_call",     _ind_put_call,      2.0, False),
+    ("aaii_bull",    _ind_aaii_bull,     0.5, True),
+    ("ad_ratio",     _ind_ad_ratio,      1.5, False),
+    ("mcclell",      _ind_mcclell,       0.5, True),
+    ("nh_nl",        _ind_nh_nl,         0.5, True),
+    ("ndx_pe",       _ind_ndx_pe,        2.0, False),
+    ("cape",         _ind_cape,          2.5, False),
+    ("yield_spread", _ind_yield_spread,  2.0, False),
+    ("pct200",       _ind_pct200,        2.0, False),
+    ("qqq_flow",     _ind_qqq_flow,      1.5, False),
+    ("hy_spread",    _ind_hy_spread,     3.0, False),
+    ("margin_debt",  _ind_margin_debt,   1.0, False),
+]
+
+def _build_ctx():
+    import pandas as pd, numpy as np, yfinance as yf
     today = pd.Timestamp.today()
     start_2y  = (today - pd.DateOffset(years=2)).strftime("%Y-%m-%d")
     start_60d = (today - pd.DateOffset(days=60)).strftime("%Y-%m-%d")
 
-    def dl1(ticker, start=None):
-        """下载单个 ticker，返回 Close Series"""
-        raw = yf.download(ticker, start=start or start_2y, auto_adjust=True, progress=False)
+    def dl1(ticker):
+        raw = yf.download(ticker, start=start_2y, auto_adjust=True, progress=False)
         c = raw["Close"] if "Close" in raw.columns else raw
-        if hasattr(c, "ndim") and c.ndim == 2: c = c.iloc[:, 0]
+        if hasattr(c,"ndim") and c.ndim==2: c=c.iloc[:,0]
         return c.dropna()
 
     def mk(val, chg, hist2y, hist60d, rnd=2, dates60d=None):
         v = round(float(val), rnd) if val is not None else None
-        h2 = [round(float(x), rnd) for x in hist2y if x is not None and not np.isnan(x)]
-        h60 = [round(float(x), rnd) for x in hist60d if x is not None and not np.isnan(x)]
+        h2  = [round(float(x),rnd) for x in hist2y  if x is not None and not np.isnan(float(x))]
+        h60 = [round(float(x),rnd) for x in hist60d if x is not None and not np.isnan(float(x))]
         c = round(float(chg), rnd) if chg is not None else None
-        out = {"value": v, "change": c,
-               "percentile": _percentile_of(h2, v),
-               "history": h60}
-        if dates60d is not None:
-            out["dates"] = list(dates60d)
+        out = {"value":v,"change":c,"percentile":_percentile_of(h2,v),"history":h60}
+        if dates60d is not None: out["dates"] = list(dates60d)
         return out
 
     def fred(series_id):
-        df = pd.read_csv(
-            f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}")
-        df.columns = ["date", "val"]
+        import pandas as pd
+        df = pd.read_csv(f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}")
+        df.columns = ["date","val"]
         df["val"] = pd.to_numeric(df["val"], errors="coerce")
         df = df.dropna(subset=["val"]).sort_values("date")
         df["date"] = pd.to_datetime(df["date"])
@@ -640,189 +805,17 @@ def _fetch_market_data():
         dates = [str(d.date()) for d in s60d["date"]]
         return s2y["val"], s60d["val"], dates
 
-    # ── VIX ──────────────────────────────────────────────────────────────────
-    try:
-        s = dl1("^VIX")
-        s2y = s; s60d = s[s.index >= start_60d]
-        chg = float(s.iloc[-1] - s.iloc[-2]) if len(s) > 1 else None
-        dates = [str(d.date()) for d in s60d.index]
-        result["vix"] = mk(s.iloc[-1], chg, s2y, s60d, dates60d=dates)
-    except: result["vix"] = {}
+    return {"dl1":dl1,"mk":mk,"fred":fred,"start_2y":start_2y,"start_60d":start_60d}
 
-    # ── Put/Call Ratio — CBOE 官网实时（Total / Equity）────────────────────
-    try:
-        import re as _re
-        pc_r = req.get("https://www.cboe.com/us/options/market_statistics/daily/",
-                       headers=_HEADERS, timeout=10)
-        # 页面里是转义 JSON: {\"name\":\"TOTAL PUT/CALL RATIO\",\"value\":\"0.74\"}
-        pc_matches = dict(_re.findall(
-            r'\{\\"name\\":\\"([^"\\\\]+PUT/CALL[^"\\\\]*)\\"[^}]*\\"value\\":\\"([^"\\\\]+)\\"',
-            pc_r.text, _re.IGNORECASE))
-        total_pc  = _safe(float(pc_matches["TOTAL PUT/CALL RATIO"]))  if "TOTAL PUT/CALL RATIO"  in pc_matches else None
-        equity_pc = _safe(float(pc_matches["EQUITY PUT/CALL RATIO"])) if "EQUITY PUT/CALL RATIO" in pc_matches else None
-        index_pc  = _safe(float(pc_matches["INDEX PUT/CALL RATIO"]))  if "INDEX PUT/CALL RATIO"  in pc_matches else None
-
-        val = equity_pc or total_pc
-        # 分位参考：equity P/C 历史区间（手工校准）
-        hist_ref = [0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70,
-                    0.75, 0.80, 0.85, 0.90, 0.95, 1.00, 1.10, 1.20]
-        result["put_call"] = {
-            "value": round(val, 2) if val else None,
-            "change": None,
-            "percentile": _percentile_of(hist_ref, val) if val else None,
-            "history": [], "dates": [],
-            "note_extra": f"Total {total_pc}  ·  Equity {equity_pc}  ·  Index {index_pc}",
-        }
-    except: result["put_call"] = {}
-
-    # ── 广度：RSP/SPY 比值（等权/市值权重，上升=广度扩张）────────────────────
-    try:
-        rsp = dl1("RSP"); spy = dl1("SPY")
-        idx = rsp.index.intersection(spy.index)
-        ratio = (rsp[idx] / spy[idx]).dropna()
-        ma5 = ratio.rolling(5).mean().dropna()
-        s60d = ma5[ma5.index >= start_60d]
-        chg = float(ma5.iloc[-1] - ma5.iloc[-2]) if len(ma5) > 1 else None
-        result["ad_ratio"] = mk(ma5.iloc[-1], chg, ma5, s60d, rnd=4)
-    except: result["ad_ratio"] = {}
-
-    # ── McClellan Oscillator — 用 RSP/SPY net momentum 近似 ─────────────────
-    try:
-        rsp = dl1("RSP"); spy = dl1("SPY")
-        idx = rsp.index.intersection(spy.index)
-        net = (rsp[idx] - spy[idx] * (rsp[idx].iloc[0] / spy[idx].iloc[0])).dropna()
-        ema19 = net.ewm(span=19, adjust=False).mean()
-        ema39 = net.ewm(span=39, adjust=False).mean()
-        mcl = (ema19 - ema39).dropna()
-        s60d = mcl[mcl.index >= start_60d]
-        chg = float(mcl.iloc[-1] - mcl.iloc[-2]) if len(mcl) > 1 else None
-        result["mcclell"] = mk(mcl.iloc[-1], chg, mcl, s60d, rnd=2)
-    except: result["mcclell"] = {}
-
-    # ── 52周新高/新低比 — QQQ vs IWM 相对强弱近似 ───────────────────────────
-    try:
-        qqq = dl1("QQQ"); iwm = dl1("IWM")
-        idx = qqq.index.intersection(iwm.index)
-        # 计算各自距52周高点的比例
-        hi52_qqq = qqq[idx].rolling(252).max()
-        hi52_iwm = iwm[idx].rolling(252).max()
-        ratio = ((qqq[idx]/hi52_qqq) / (iwm[idx]/hi52_iwm)).dropna()
-        s60d = ratio[ratio.index >= start_60d]
-        chg = float(ratio.iloc[-1] - ratio.iloc[-2]) if len(ratio) > 1 else None
-        result["nh_nl"] = mk(ratio.iloc[-1], chg, ratio, s60d, rnd=3)
-    except: result["nh_nl"] = {}
-
-    # ── 纳指 PE ──────────────────────────────────────────────────────────────
-    try:
-        pe = _safe(yf.Ticker("QQQ").info.get("trailingPE"))
-        # 近10年纳指 PE 历史区间作为分位参考
-        hist_ref = [15,18,20,22,24,26,28,30,32,35,38,40,42,45]
-        result["ndx_pe"] = {
-            "value": round(float(pe), 1) if pe else None, "change": None,
-            "percentile": _percentile_of(hist_ref, pe) if pe else None,
-            "history": [],
-        }
-    except: result["ndx_pe"] = {}
-
-    # ── CAPE (Shiller PE) — Yale 数据 ────────────────────────────────────────
-    try:
-        df = pd.read_excel("http://www.econ.yale.edu/~shiller/data/ie_data.xls",
-                           sheet_name="Data", skiprows=7, engine="xlrd")
-        cape = pd.to_numeric(df["CAPE"], errors="coerce").dropna().tail(300).tolist()
-        val = cape[-1] if cape else None
-        result["cape"] = {
-            "value": round(float(val), 1) if val else None, "change": None,
-            "percentile": _percentile_of([round(v,1) for v in cape], val) if val else None,
-            "history": [round(v,1) for v in cape[-24:]],
-        }
-    except: result["cape"] = {}
-
-    # ── 10Y-2Y 利差 — FRED T10Y2Y ────────────────────────────────────────────
-    try:
-        s2y, s60d, dates = fred("T10Y2Y")
-        chg = float(s2y.iloc[-1] - s2y.iloc[-2]) if len(s2y) > 1 else None
-        result["yield_spread"] = mk(s2y.iloc[-1], chg, s2y, s60d, rnd=2, dates60d=dates)
-    except: result["yield_spread"] = {}
-
-    # ── 标普500>200均线占比 — SPY+QQQ+IWM 均自身均线判断 ────────────────────
-    try:
-        scores = {}
-        for t in ["SPY","QQQ","IWM","DIA","MDY"]:
-            try:
-                s = dl1(t)
-                ma200 = s.rolling(200).mean()
-                above = (s > ma200).astype(float).rolling(20).mean().dropna()
-                scores[t] = above
-            except: pass
-        if scores:
-            combined = pd.concat(scores.values(), axis=1).mean(axis=1).dropna() * 100
-            s60d = combined[combined.index >= start_60d]
-            chg = float(combined.iloc[-1] - combined.iloc[-2]) if len(combined) > 1 else None
-            result["pct200"] = mk(combined.iloc[-1], chg, combined, s60d, rnd=1)
-        else: result["pct200"] = {}
-    except: result["pct200"] = {}
-
-    # ── QQQ 资金流向（3日成交额滚动）────────────────────────────────────────
-    try:
-        raw = yf.download("QQQ", start=start_60d, auto_adjust=True, progress=False)
-        prices = raw["Close"].dropna()
-        volume = raw["Volume"].dropna()
-        if hasattr(prices,"ndim") and prices.ndim==2: prices=prices.iloc[:,0]
-        if hasattr(volume,"ndim") and volume.ndim==2: volume=volume.iloc[:,0]
-        flow = (prices * volume / 1e8).dropna()
-        flow3 = flow.rolling(3).sum().dropna()
-        # 2年历史分位用60天数据近似
-        chg = float(flow3.iloc[-1] - flow3.iloc[-2]) if len(flow3) > 1 else None
-        result["qqq_flow"] = mk(flow3.iloc[-1], chg, flow3, flow3, rnd=1)
-    except: result["qqq_flow"] = {}
-
-    # ── 垃圾债信用利差 — FRED BAMLH0A0HYM2（单位：%，展示为bps）────────────
-    try:
-        s2y, s60d, dates = fred("BAMLH0A0HYM2")
-        val_bps = float(s2y.iloc[-1]) * 100
-        chg_bps = float(s2y.iloc[-1] - s2y.iloc[-2]) * 100 if len(s2y) > 1 else None
-        h2_bps = [v*100 for v in s2y.tolist()]
-        h60_bps = [v*100 for v in s60d.tolist()]
-        result["hy_spread"] = {
-            "value": round(val_bps, 0), "change": round(chg_bps, 0) if chg_bps else None,
-            "percentile": _percentile_of(h2_bps, val_bps),
-            "history": [round(v, 0) for v in h60_bps],
-            "dates": dates,
-        }
-    except: result["hy_spread"] = {}
-
-    # ── 保证金债务 — FRED BOGMBBM（商业银行保证金贷款，月度，单位：十亿→亿）
-    try:
-        s2y, s60d, dates = fred("BOGMBBM")
-        val = float(s2y.iloc[-1]) * 10
-        chg = float(s2y.iloc[-1] - s2y.iloc[-2]) * 10 if len(s2y) > 1 else None
-        h2 = [v*10 for v in s2y.tolist()]
-        h60 = [v*10 for v in s60d.tolist()]
-        result["margin_debt"] = {
-            "value": round(val, 0), "change": round(chg, 0) if chg else None,
-            "percentile": _percentile_of(h2, val),
-            "history": [round(v, 0) for v in h60],
-            "dates": dates,
-        }
-    except: result["margin_debt"] = {}
-
-    # ── AAII 散户情绪 — 用 IWM/SPY 比值近似（散户偏好小盘）───────────────────
-    try:
-        iwm = dl1("IWM"); spy = dl1("SPY")
-        idx = iwm.index.intersection(spy.index)
-        ratio = (iwm[idx] / spy[idx]).dropna()
-        pct = ratio.rank(pct=True) * 100
-        s60d = pct[pct.index >= start_60d]
-        val = float(pct.iloc[-1])
-        chg = float(pct.iloc[-1] - pct.iloc[-2]) if len(pct) > 1 else None
-        result["aaii_bull"] = mk(val, chg, pct, s60d, rnd=1)
-    except: result["aaii_bull"] = {}
-
+def _fetch_market_data():
+    ctx = _build_ctx()
+    result = {}
+    for key, fn, _weight, _proxy in _MARKET_INDICATORS:
+        try:
+            result[key] = fn(ctx)
+        except:
+            result[key] = {}
     return result
-
-
-_market_cache = {"ts": 0, "data": None}
-_MARKET_TTL = 3600  # 1小时缓存
 
 @app.route("/api/market")
 def api_market():
@@ -837,6 +830,53 @@ def api_market():
         return jsonify(data)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route("/api/market/stream")
+def api_market_stream():
+    """逐指标推送 SSE，每算完一个立即发出；同时写入缓存"""
+    import time, queue as _q
+    force = request.args.get("force","0") == "1"
+    now = time.time()
+    # 缓存命中直接一次性推全量
+    if not force and now - _market_cache["ts"] < _MARKET_TTL and _market_cache["data"]:
+        cached = _market_cache["data"]
+        def _stream_cached():
+            for key, _fn, _w, _p in _MARKET_INDICATORS:
+                d = cached.get(key, {})
+                msg = json.dumps({"key": key, "data": d}, ensure_ascii=False)
+                yield f"event: indicator\ndata: {msg}\n\n"
+            yield f"event: done\ndata: {{\"ts\":{int(_market_cache['ts'])}}}\n\n"
+        return Response(_stream_cached(), mimetype="text/event-stream",
+                        headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
+
+    result_acc = {}
+    result_lock = threading.Lock()
+
+    def _stream_live():
+        ctx = _build_ctx()
+        for key, fn, _w, _p in _MARKET_INDICATORS:
+            try:
+                d = fn(ctx)
+            except Exception as e:
+                d = {"error": str(e)}
+            with result_lock:
+                result_acc[key] = d
+            # clean NaN before sending
+            def _clean(obj):
+                if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)): return None
+                if isinstance(obj, dict):  return {k: _clean(v) for k,v in obj.items()}
+                if isinstance(obj, list):  return [_clean(v) for v in obj]
+                return obj
+            msg = json.dumps({"key": key, "data": _clean(d)}, ensure_ascii=False)
+            yield f"event: indicator\ndata: {msg}\n\n"
+        # write cache
+        ts = time.time()
+        _market_cache["ts"] = ts
+        _market_cache["data"] = dict(result_acc)
+        yield f"event: done\ndata: {{\"ts\":{int(ts)}}}\n\n"
+
+    return Response(_stream_live(), mimetype="text/event-stream",
+                    headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
 
 
 

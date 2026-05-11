@@ -424,6 +424,14 @@ tr.selected td:first-child{border-left:2px solid var(--accent);padding-left:10px
         <span class="wp-dot"></span>加载中…
       </span>
     </div>
+    <div style="margin-left:auto;display:flex;align-items:center;gap:10px;flex-shrink:0">
+      <span id="dashTs" style="font-size:11px;color:var(--text3)"></span>
+      <button id="dashRefreshBtn" onclick="refreshDashboard()" style="
+        height:28px;padding:0 12px;border-radius:6px;border:1px solid var(--border);
+        background:var(--surface2);color:var(--text2);font-size:12px;font-weight:600;cursor:pointer;">
+        ↺ 刷新
+      </button>
+    </div>
   </div>
 
   <div>
@@ -597,34 +605,48 @@ function setView(v) {
 // ── dashboard data & render ───────────────────────────────────────────────────
 let dashLoaded = false;
 
+// weight: 温度计加权; proxy: 是否代理指标（卡片加 ≈ 标注，计分降权已含在weight里）
 const INDICATORS = [
-  { key:'vix',         name:'VIX 恐慌指数',         unit:'',    group:'sentiment', warn:'high',
+  { key:'vix',         name:'VIX 恐慌指数',         unit:'',    group:'sentiment', warn:'high',  weight:3.0, proxy:false,
     note:'>30 恐慌区（反向低吸），<15 过度乐观' },
-  { key:'put_call',    name:'Put/Call Ratio',        unit:'',    group:'sentiment', warn:'low',
+  { key:'put_call',    name:'Put/Call Ratio',        unit:'',    group:'sentiment', warn:'low',   weight:2.0, proxy:false,
     note:'<0.7 过度乐观预警，>1.2 恐慌底部区' },
-  { key:'aaii_bull',   name:'AAII 散户看多%',        unit:'%',   group:'sentiment', warn:'high',
+  { key:'aaii_bull',   name:'AAII 散户情绪',         unit:'%',   group:'sentiment', warn:'high',  weight:0.5, proxy:true,
     note:'>55% 历史高位，反向止盈信号' },
-  { key:'ad_ratio',    name:'涨跌家数比（5日均）',   unit:'',    group:'sentiment', warn:'low',
+  { key:'ad_ratio',    name:'涨跌家数比（5日均）',   unit:'',    group:'sentiment', warn:'low',   weight:1.5, proxy:false,
     note:'<0.8 市场内部走弱，>1.2 强势扩散' },
-  { key:'mcclell',     name:'McClellan Oscillator',  unit:'',    group:'sentiment', warn:'both',
+  { key:'mcclell',     name:'McClellan Oscillator',  unit:'',    group:'sentiment', warn:'both',  weight:0.5, proxy:true,
     note:'>100 短期超买，<-100 短期超卖' },
-  { key:'nh_nl',       name:'52周新高/新低比',       unit:'',    group:'sentiment', warn:'low',
+  { key:'nh_nl',       name:'52周新高/新低比',       unit:'',    group:'sentiment', warn:'low',   weight:0.5, proxy:true,
     note:'持续<1 说明市场内部已恶化' },
-  { key:'ndx_pe',      name:'纳指 PE（TTM）',        unit:'x',   group:'valuation', warn:'high',
+  { key:'ndx_pe',      name:'纳指 PE（TTM）',        unit:'x',   group:'valuation', warn:'high',  weight:2.0, proxy:false,
     note:'>35x 历史偏贵，<20x 相对低估' },
-  { key:'cape',        name:'标普500 CAPE',          unit:'x',   group:'valuation', warn:'high',
+  { key:'cape',        name:'标普500 CAPE',          unit:'x',   group:'valuation', warn:'high',  weight:2.5, proxy:false,
     note:'>35 历史极值区，Shiller PE' },
-  { key:'yield_spread',name:'10Y-2Y 利差',           unit:'%',   group:'valuation', warn:'low',
+  { key:'yield_spread',name:'10Y-2Y 利差',           unit:'%',   group:'valuation', warn:'low',   weight:2.0, proxy:false,
     note:'倒挂修复过程常伴随衰退风险' },
-  { key:'pct200',      name:'标普500>200均线占比',   unit:'%',   group:'valuation', warn:'low',
+  { key:'pct200',      name:'标普500>200均线占比',   unit:'%',   group:'valuation', warn:'low',   weight:2.0, proxy:false,
     note:'<40% 市场内部显著走弱' },
-  { key:'qqq_flow',    name:'QQQ 3日资金净流向',     unit:'亿$', group:'flow',      warn:'both',
+  { key:'qqq_flow',    name:'QQQ 3日资金净流向',     unit:'亿$', group:'flow',      warn:'both',  weight:1.5, proxy:false,
     note:'持续流出预警，持续流入确认趋势' },
-  { key:'hy_spread',   name:'垃圾债信用利差',         unit:'bps', group:'flow',      warn:'high',
+  { key:'hy_spread',   name:'垃圾债信用利差',         unit:'bps', group:'flow',      warn:'high',  weight:3.0, proxy:false,
     note:'>500bps 信用市场压力' },
-  { key:'margin_debt', name:'保证金债务余额',         unit:'亿$', group:'flow',      warn:'high',
+  { key:'margin_debt', name:'保证金债务余额',         unit:'亿$', group:'flow',      warn:'high',  weight:1.0, proxy:false,
     note:'快速下降常领先大盘下跌（月度）' },
 ];
+
+// skeleton card while loading
+function skeletonCard() {
+  return `<div class="icard" style="opacity:.45">
+    <div class="icard-top">
+      <span class="icard-name" style="background:var(--surface2);border-radius:3px;color:transparent;user-select:none">████████</span>
+      <span class="ibadge ib-na" style="color:transparent">████</span>
+    </div>
+    <div style="height:32px;background:var(--surface2);border-radius:4px;width:70px;margin:4px 0"></div>
+    <div style="height:8px;background:var(--surface2);border-radius:4px"></div>
+    <div style="height:64px;background:var(--surface2);border-radius:4px"></div>
+  </div>`;
+}
 
 function pctColor(pct, warn) {
   if (warn === 'high') return pct > 70 ? 'red' : pct > 40 ? 'amber' : 'green';
@@ -750,10 +772,12 @@ function renderDashCard(ind, d) {
       </div>
     </div>` : '';
   const spark = hist.length >= 2 ? `<div class="spark-wrap"><canvas id="sp-${ind.key}"></canvas></div>` : '';
+  const proxyBadge = ind.proxy
+    ? `<span title="代理指标（非原始数据）" style="font-size:10px;color:var(--text3);background:var(--surface2);border:1px solid var(--border);border-radius:3px;padding:1px 5px;margin-left:4px;cursor:default">≈ 近似</span>` : '';
   return `
     <div class="icard ${cCls}">
       <div class="icard-top">
-        <span class="icard-name">${ind.name}</span>
+        <span class="icard-name">${ind.name}${proxyBadge}</span>
         <span class="ibadge ${bCls}">${label}</span>
       </div>
       <div class="icard-val">
@@ -769,7 +793,7 @@ function renderDashCard(ind, d) {
 
 function renderDashboard(data) {
   const groups = {sentiment:'', valuation:'', flow:''};
-  INDICATORS.forEach(ind => { groups[ind.group] += renderDashCard(ind, data[ind.key]); });
+  INDICATORS.forEach(ind => { groups[ind.group] += renderDashCard(ind, data[ind.key] || {}); });
   document.getElementById('dg-sentiment').innerHTML = groups.sentiment;
   document.getElementById('dg-valuation').innerHTML = groups.valuation;
   document.getElementById('dg-flow').innerHTML      = groups.flow;
@@ -781,17 +805,22 @@ function renderDashboard(data) {
       drawSpark(c, d.history, color, d.dates || null);
     }
   });
-  // summary
-  let score=0, cnt=0, reds=[], ambers=[];
+  updateSummary(data);
+}
+
+function updateSummary(data) {
+  // 加权温度计
+  let wScore=0, wTotal=0, reds=[], ambers=[];
   INDICATORS.forEach(ind => {
     const d = data[ind.key]; if (!d || d.percentile==null) return;
     const c = pctColor(d.percentile, ind.warn);
-    score += c==='red'?100:c==='amber'?55:15; cnt++;
+    const raw = c==='red'?100:c==='amber'?55:15;
+    wScore += raw * ind.weight; wTotal += ind.weight;
     const short = ind.name.split('（')[0].split(' ')[0];
     if (c==='red') reds.push(short);
     else if (c==='amber') ambers.push(short);
   });
-  const avg = cnt ? Math.round(score/cnt) : null;
+  const avg = wTotal ? Math.round(wScore/wTotal) : null;
   const col = avg>70?'var(--red)':avg>45?'var(--amber)':'var(--green)';
   const ring = document.getElementById('tempRing');
   ring.style.borderColor = col;
@@ -804,22 +833,82 @@ function renderDashboard(data) {
   pills.innerHTML = '';
   if (reds.length)   pills.innerHTML += `<span class="wpill wp-red"><span class="wp-dot"></span>${reds.length}项高风险：${reds.slice(0,3).join('、')}${reds.length>3?'…':''}</span>`;
   if (ambers.length) pills.innerHTML += `<span class="wpill wp-amber"><span class="wp-dot"></span>${ambers.length}项需关注：${ambers.slice(0,3).join('、')}${ambers.length>3?'…':''}</span>`;
-  if (!reds.length && !ambers.length && cnt>0) pills.innerHTML = `<span class="wpill wp-green"><span class="wp-dot"></span>当前无预警指标</span>`;
+  if (!reds.length && !ambers.length && wTotal>0) pills.innerHTML = `<span class="wpill wp-green"><span class="wp-dot"></span>当前无预警指标</span>`;
 }
 
-async function loadDashboard() {
-  dashLoaded = true;
-  try {
-    const res = await fetch('/api/market');
-    const data = await res.json();
-    if (data.error) throw new Error(data.error);
-    renderDashboard(data);
-  } catch(e) {
-    ['dg-sentiment','dg-valuation','dg-flow'].forEach(id => {
-      document.getElementById(id).innerHTML =
-        `<div style="color:var(--red);font-size:12px;padding:10px 0">获取失败：${e.message}</div>`;
-    });
+// single card update (called from SSE stream)
+function updateCard(key, d) {
+  const ind = INDICATORS.find(i=>i.key===key);
+  if (!ind) return;
+  const grid = document.getElementById('dg-'+ind.group);
+  if (!grid) return;
+  // replace skeleton or existing card
+  const existing = grid.querySelector(`[data-key="${key}"]`);
+  const html = renderDashCard(ind, d);
+  const tmp = document.createElement('div');
+  tmp.innerHTML = html.trim();
+  const el = tmp.firstElementChild;
+  el.setAttribute('data-key', key);
+  if (existing) existing.replaceWith(el);
+  else grid.appendChild(el);
+  // draw spark
+  const c = el.querySelector(`#sp-${key}`);
+  if (c && d?.history?.length) {
+    const color = d.percentile != null ? pctColor(d.percentile, ind.warn) : 'na';
+    drawSpark(c, d.history, color, d.dates || null);
   }
+}
+
+let _dashData = {};
+let _dashSse = null;
+
+async function loadDashboard(force=false) {
+  dashLoaded = true;
+  _dashData = {};
+
+  // show skeletons immediately
+  const sentimentKeys = INDICATORS.filter(i=>i.group==='sentiment');
+  const valuationKeys = INDICATORS.filter(i=>i.group==='valuation');
+  const flowKeys      = INDICATORS.filter(i=>i.group==='flow');
+  document.getElementById('dg-sentiment').innerHTML = sentimentKeys.map(i=>`<div data-key="${i.key}">${skeletonCard()}</div>`).join('');
+  document.getElementById('dg-valuation').innerHTML = valuationKeys.map(i=>`<div data-key="${i.key}">${skeletonCard()}</div>`).join('');
+  document.getElementById('dg-flow').innerHTML      = flowKeys.map(i=>`<div data-key="${i.key}">${skeletonCard()}</div>`).join('');
+
+  document.getElementById('dashRefreshBtn').disabled = true;
+
+  if (_dashSse) { _dashSse.close(); _dashSse = null; }
+  const url = '/api/market/stream' + (force ? '?force=1' : '');
+  _dashSse = new EventSource(url);
+
+  _dashSse.addEventListener('indicator', e => {
+    try {
+      const { key, data } = JSON.parse(e.data);
+      _dashData[key] = data;
+      updateCard(key, data);
+      updateSummary(_dashData);
+    } catch(_) {}
+  });
+
+  _dashSse.addEventListener('done', e => {
+    try {
+      const { ts } = JSON.parse(e.data);
+      const t = new Date(ts * 1000);
+      document.getElementById('dashTs').textContent =
+        `更新于 ${t.getHours().toString().padStart(2,'0')}:${t.getMinutes().toString().padStart(2,'0')}`;
+    } catch(_) {}
+    document.getElementById('dashRefreshBtn').disabled = false;
+    _dashSse.close(); _dashSse = null;
+  });
+
+  _dashSse.onerror = () => {
+    document.getElementById('dashRefreshBtn').disabled = false;
+    if (_dashSse) { _dashSse.close(); _dashSse = null; }
+  };
+}
+
+function refreshDashboard() {
+  dashLoaded = true;
+  loadDashboard(true);
 }
 
 // init to dashboard view
