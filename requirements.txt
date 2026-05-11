@@ -1,0 +1,6 @@
+flask>=3.0
+yfinance>=0.2
+pandas>=2.0
+requests>=2.31
+lxml>=5.0
+html5lib>=1.1
