@@ -316,6 +316,14 @@ tr.selected td:first-child{border-left:2px solid var(--accent);padding-left:10px
   align-items:center;justify-content:center;border-radius:var(--radius)}
 .ld-wrap.show{display:flex}
 
+.heatmap-table{border-collapse:collapse;font-size:11px;white-space:nowrap}
+.heatmap-table th{position:sticky;top:0;background:var(--surface);padding:5px 4px;text-align:center;border-bottom:2px solid var(--border);font-size:10px;font-weight:700;color:var(--text2);min-width:64px;z-index:2}
+.heatmap-table td.date-col{position:sticky;left:0;background:var(--surface);z-index:1;min-width:46px;font-size:10px;color:var(--text3);padding:2px 6px;border-right:1px solid var(--border)}
+.heatmap-table th.date-col{z-index:3;text-align:left}
+.heat-cell{padding:2px 3px;text-align:center;font-size:10px;font-weight:600;font-variant-numeric:tabular-nums;cursor:default}
+.heat-cell:hover{outline:2px solid rgba(0,0,0,.3);outline-offset:-1px;z-index:1;position:relative}
+.sec-ticker{font-size:9px;font-weight:400;color:var(--text3);display:block}
+.trend-row td{border-top:2px solid var(--border);font-size:11px;font-weight:700}
 ::-webkit-scrollbar{width:5px;height:5px}
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
@@ -342,6 +350,7 @@ tr.selected td:first-child{border-left:2px solid var(--accent);padding-left:10px
   <div class="view-bar">
     <button class="vtab active" id="vtab-dashboard" onclick="setView('dashboard')">🌡 市场温度</button>
     <button class="vtab" id="vtab-strategy" onclick="setView('strategy')">📊 策略排序</button>
+    <button class="vtab" id="vtab-sectors" onclick="setView('sectors')">🔥 板块热力</button>
   </div>
 
   <!-- strategy tabs (only in strategy view) -->
@@ -481,18 +490,33 @@ tr.selected td:first-child{border-left:2px solid var(--accent);padding-left:10px
   </aside>
 </div><!-- /viewStrategy -->
 
+<!-- sector heatmap view -->
+<div id="viewSectors" style="display:none;flex:1;overflow:hidden;flex-direction:column">
+  <div class="status-bar" style="flex-shrink:0">
+    <div class="status-dot" id="sectorDot"></div>
+    <span id="sectorStatus">加载中…</span>
+    <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+      <span id="sectorTs" style="font-size:11px;color:var(--text3)"></span>
+      <button onclick="loadSectorHeatmap(true)" style="height:26px;padding:0 10px;border-radius:5px;border:1px solid var(--border);background:var(--surface2);color:var(--text2);font-size:11px;font-weight:600;cursor:pointer">↺ 刷新</button>
+    </div>
+  </div>
+  <div style="flex:1;overflow:auto;padding:12px 16px" id="sectorHeatmapWrap">
+    <div class="empty-state"><div class="spinner"></div><p>加载板块数据…</p></div>
+  </div>
+</div>
+
 <script>
 // ── config ────────────────────────────────────────────────────────────────────
 const STRAT_META = {
   momentum: {
     desc: "月度收益率算术均值，捕捉持续上涨趋势；适合趋势明确的牛市行情",
     sortKey: "mom_mean", sortAsc: false,
-    cols: ["rank","ticker","sector","price","mom_mean","total_ret","sharpe","max_dd"],
+    cols: ["rank","ticker","sector","price","mom_mean","total_ret","sharpe","max_dd","short_float","inst_hold"],
   },
   momentum_quality: {
     desc: "动量(50%) + ROE(30%) + 净利润率(20%) 综合打分，过滤基本面差的动量股",
     sortKey: "composite", sortAsc: false,
-    cols: ["rank","ticker","sector","price","composite","mom_mean","roe","profit_margin","max_dd"],
+    cols: ["rank","ticker","sector","price","composite","mom_mean","roe","profit_margin","max_dd","short_float","inst_hold"],
   },
   low_vol: {
     desc: "以 Beta 和年化波动率升序排列，优先低风险品种；适合震荡市或防御配置",
@@ -512,7 +536,7 @@ const STRAT_META = {
   multifactor: {
     desc: "多因子 Z-Score 合成：动量35% + ROE25% + 净利润率15% + 低Beta15% + 低PS10%",
     sortKey: "mf_score", sortAsc: false,
-    cols: ["rank","ticker","sector","price","mf_score","mom_mean","roe","profit_margin","beta","ps"],
+    cols: ["rank","ticker","sector","price","mf_score","mom_mean","roe","profit_margin","beta","ps","short_float","inst_hold"],
   },
 };
 
@@ -569,6 +593,8 @@ const COL_DEF = {
       <div class="cbar-bg"><div class="cbar-fill" style="width:${pct}%"></div></div></div>`;
   }},
   ps:           { label:"P/S",          fmt:(v)=>v!=null?`<span class="num neu">${v}</span>`:'<span class="neu">—</span>' },
+  short_float:  { label:'空头比%',      fmt:(v)=>v!=null?`<span class="num ${v>10?'neg':v<5?'pos':'neu'}">${v}%</span>`:'<span class="neu">—</span>' },
+  inst_hold:    { label:'机构持仓%',    fmt:(v)=>v!=null?`<span class="num">${v}%</span>`:'<span class="neu">—</span>' },
 };
 
 function fPips(v, total) {
@@ -583,17 +609,18 @@ function fPips(v, total) {
 
 // ── view switching ────────────────────────────────────────────────────────────
 function setView(v) {
-  const isDash = v === 'dashboard';
+  const isDash = v === 'dashboard', isSec = v === 'sectors', isStr = v === 'strategy';
   document.getElementById('viewDashboard').style.display = isDash ? 'flex' : 'none';
-  document.getElementById('viewStrategy').style.display  = isDash ? 'none' : 'flex';
-  document.getElementById('strategyBar').style.display   = isDash ? 'none' : 'flex';
-  document.getElementById('runBtn').style.display        = isDash ? 'none' : 'flex';
+  document.getElementById('viewStrategy').style.display  = isStr  ? 'flex' : 'none';
+  document.getElementById('viewSectors').style.display   = isSec  ? 'flex' : 'none';
+  document.getElementById('strategyBar').style.display   = isStr  ? 'flex' : 'none';
+  document.getElementById('runBtn').style.display        = isStr  ? 'flex' : 'none';
   document.querySelectorAll('.vtab').forEach(b => b.classList.toggle('active', b.id === 'vtab-' + v));
-  // hide filter/desc bars when on dashboard
-  document.querySelector('.filter-bar').style.display   = isDash ? 'none' : 'flex';
-  document.querySelector('.strat-desc').style.display   = isDash ? 'none' : 'flex';
-  document.querySelector('.progress-wrap').style.display = isDash ? 'none' : 'block';
+  document.querySelector('.filter-bar').style.display    = isStr  ? 'flex' : 'none';
+  document.querySelector('.strat-desc').style.display    = isStr  ? 'flex' : 'none';
+  document.querySelector('.progress-wrap').style.display = isStr  ? 'block' : 'none';
   if (isDash && !dashLoaded) loadDashboard();
+  if (isSec  && !sectorsLoaded) loadSectorHeatmap();
 }
 
 // ── dashboard data & render ───────────────────────────────────────────────────
@@ -613,6 +640,10 @@ const INDICATORS = [
   { key:'pct200',      name:'>200均线占比',         unit:'%',   layer:'tactical',  warn:'low',   weight:2.0,
     note:'<40% 市场内部显著走弱，>70% 趋势健康' },
   // ── 战略层 ──────────────────────────────────────────────────────────────
+  { key:'gold',        name:'黄金期货（GC=F）',     unit:'',    layer:'tactical',  warn:'both',  weight:0.0,
+    note:'避险情绪指标；快速上涨常伴随不确定性上升，对通谀/地缘风险敏感' },
+  { key:'oil',         name:'WTI 原油（CL=F）',      unit:'',    layer:'tactical',  warn:'both',  weight:0.0,
+    note:'能源成本压力；大幅拉升加剧通谀预期，压制企业利润率' },
   { key:'real_rate',   name:'实际利率（TIPS 10Y）', unit:'%',   layer:'strategic', warn:'high',  weight:3.0,
     note:'>2% 压制成长股估值；上升趋势 = 折现率上行' },
   { key:'cape',        name:'CAPE（Shiller PE）',   unit:'x',   layer:'strategic', warn:'high',  weight:2.5,
@@ -1215,6 +1246,8 @@ function renderDetail({info,prices}, row) {
         ${kv('ROE',fp(info.roe),info.roe,true)}
         ${kv('Beta',f2(info.beta),null,false)}
         ${kv('股息率',fp(info.dividend_yield),null,false)}
+        ${info.short_float!=null?kv('空头比例',fp(info.short_float/100),info.short_float,false):''}
+        ${info.inst_hold!=null?kv('机构持仓',fp(info.inst_hold/100),null,false):''}
       </div>
     </div>
     <div>
@@ -1281,6 +1314,98 @@ function setStatus(state,msg){
   document.getElementById('statusText').textContent=msg;
 }
 function setProgress(p){document.getElementById('progressBar').style.width=p+'%';}
+// ── sector heatmap ───────────────────────────────────────────────────────────
+let sectorsLoaded = false;
+let _sectorCache = null;
+
+function heatBg(val) {
+  if (val == null) return 'var(--surface2)';
+  const intensity = Math.min(Math.abs(val) / 2.5, 1);
+  const a = (0.08 + intensity * 0.72).toFixed(2);
+  return val > 0 ? `rgba(22,163,74,${a})` : `rgba(220,38,38,${a})`;
+}
+function heatFg(val) {
+  if (val == null) return 'var(--text3)';
+  return val > 0 ? '#15803d' : val < 0 ? '#b91c1c' : 'var(--text2)';
+}
+function heatFmt(val, dec) {
+  if (val == null) return '—';
+  return (val > 0 ? '+' : '') + val.toFixed(dec) + '%';
+}
+
+function renderSectorHeatmap(data) {
+  const { sectors, dates } = data;
+  const wrap = document.getElementById('sectorHeatmapWrap');
+
+  let h = '<div style="margin-bottom:10px;display:flex;align-items:center;gap:16px;font-size:11px;color:var(--text2)">';
+  h += '<span style="font-weight:700">板块热力图 · 近60交易日日收益率</span>';
+  h += '<span style="color:var(--text3)">颜色深度代表涨跌幅大小（饱和点 ±2.5%）· hover 查看精确值</span>';
+  h += '</div>';
+
+  h += '<div style="overflow:auto"><table class="heatmap-table"><thead><tr>';
+  h += '<th class="date-col">日期</th>';
+  sectors.forEach(s => { h += `<th>${s.name}<span class="sec-ticker">${s.ticker}</span></th>`; });
+  h += '</tr></thead><tbody>';
+
+  // trend summary rows (近5日 / 近20日 / 近60日)
+  [['近5日', 'cum5', 1], ['近20日', 'cum20', 1], ['近60日', 'cum60', 1]].forEach(([label, key, dec]) => {
+    h += `<tr class="trend-row"><td class="date-col" style="color:var(--text);font-weight:700">${label}</td>`;
+    sectors.forEach(s => {
+      const v = s[key];
+      h += `<td class="heat-cell" style="background:${heatBg(v)};color:${heatFg(v)}">${heatFmt(v, dec)}</td>`;
+    });
+    h += '</tr>';
+  });
+
+  // divider
+  h += `<tr><td colspan="${sectors.length + 1}" style="height:5px;background:var(--surface2);padding:0"></td></tr>`;
+
+  // daily rows oldest→newest (newest at bottom; view auto-scrolls)
+  dates.forEach((date, di) => {
+    h += `<tr><td class="date-col">${date.slice(5)}</td>`;
+    sectors.forEach(s => {
+      const v = s.returns[di];
+      const title = `${date}  ${s.name}: ${heatFmt(v, 2)}`;
+      h += `<td class="heat-cell" style="background:${heatBg(v)};color:${heatFg(v)}" title="${title}">${heatFmt(v, 2)}</td>`;
+    });
+    h += '</tr>';
+  });
+
+  h += '</tbody></table></div>';
+  wrap.innerHTML = h;
+  wrap.scrollTop = wrap.scrollHeight;
+}
+
+async function loadSectorHeatmap(force = false) {
+  sectorsLoaded = true;
+  const wrap = document.getElementById('sectorHeatmapWrap');
+  const dot  = document.getElementById('sectorDot');
+  const stat = document.getElementById('sectorStatus');
+
+  if (!force && _sectorCache) { renderSectorHeatmap(_sectorCache); return; }
+
+  dot.className = 'status-dot running';
+  stat.textContent = '获取板块数据…';
+  wrap.innerHTML = '<div class="empty-state"><div class="spinner"></div><p>获取中…</p></div>';
+
+  try {
+    const resp = await fetch('/api/sectors/heatmap');
+    const data = await resp.json();
+    if (data.error) throw new Error(data.error);
+    _sectorCache = data;
+    renderSectorHeatmap(data);
+    dot.className = 'status-dot done';
+    const now = new Date();
+    document.getElementById('sectorTs').textContent =
+      `更新于 ${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}`;
+    stat.textContent = `${data.sectors.length} 个板块 · 近60交易日`;
+  } catch (e) {
+    dot.className = 'status-dot error';
+    stat.textContent = '加载失败：' + e.message;
+    wrap.innerHTML = `<div class="empty-state"><p style="color:var(--red)">加载失败：${esc(e.message)}</p></div>`;
+  }
+}
+
 </script>
 </body>
 </html>

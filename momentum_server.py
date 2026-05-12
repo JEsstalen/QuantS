@@ -187,12 +187,23 @@ def _meta_info(meta_idx, ticker):
 def calc_momentum(prices, meta, start_str, end_str):
     import pandas as pd
     meta_idx = meta.set_index("Ticker")
-    results, total = [], len(prices.columns)
+    price_stats, total = {}, len(prices.columns)
     for idx, ticker in enumerate(prices.columns):
-        if idx%50==0: log(f"计算动量 {idx}/{total}…", 58+int(idx/total*35))
+        if idx%50==0: log(f"计算动量 {idx}/{total}…", 58+int(idx/total*22))
         ps = _monthly_stats(prices, ticker)
-        if ps is None: continue
-        results.append({**_meta_info(meta_idx, ticker), "ticker": ticker, **ps})
+        if ps: price_stats[ticker] = ps
+
+    valid = list(price_stats.keys())
+    FIELDS = ["shortPercentOfFloat","institutionsPercentHeld"]
+    fundamentals = _parallel_info(valid, FIELDS, "基本面", 81, 96, workers=20)
+
+    results = []
+    for t in valid:
+        fs = fundamentals.get(t, {})
+        sf = round(fs["shortPercentOfFloat"]*100,1)    if fs.get("shortPercentOfFloat")    is not None else None
+        ih = round(fs["institutionsPercentHeld"]*100,1) if fs.get("institutionsPercentHeld") is not None else None
+        results.append({**_meta_info(meta_idx, t), "ticker": t, **price_stats[t], "short_float": sf, "inst_hold": ih})
+
     df = pd.DataFrame(results).sort_values("mom_mean", ascending=False).reset_index(drop=True)
     df.insert(0,"rank",range(1,len(df)+1))
     log("计算完成", 100)
@@ -223,6 +234,7 @@ def _fetch_info(ticker, fields):
             "revenueGrowth","earningsGrowth","debtToEquity","dividendYield",
             "fiftyTwoWeekHigh","fiftyTwoWeekLow","targetMeanPrice","recommendationKey",
             "shortName","sector","industry",
+            "shortPercentOfFloat","institutionsPercentHeld",
         )}
         _cache_set_info(ticker, data)
         return ticker, {k: data.get(k) for k in fields}
@@ -259,7 +271,7 @@ def calc_momentum_quality(prices, meta, start_str, end_str):
         if ps: price_stats[t] = ps
 
     valid = list(price_stats.keys())
-    FIELDS = ["returnOnEquity", "profitMargins"]
+    FIELDS = ["returnOnEquity", "profitMargins", "shortPercentOfFloat", "institutionsPercentHeld"]
     fundamentals = _parallel_info(valid, FIELDS, "基本面", 71, 95, workers=20)
 
     rows = []
@@ -267,8 +279,10 @@ def calc_momentum_quality(prices, meta, start_str, end_str):
         fs = fundamentals.get(t, {})
         roe = round(fs["returnOnEquity"]*100,1) if fs.get("returnOnEquity") is not None else None
         pm  = round(fs["profitMargins"]*100,1)  if fs.get("profitMargins")  is not None else None
+        sf  = round(fs["shortPercentOfFloat"]*100,1)    if fs.get("shortPercentOfFloat")    is not None else None
+        ih  = round(fs["institutionsPercentHeld"]*100,1) if fs.get("institutionsPercentHeld") is not None else None
         rows.append({**_meta_info(meta_idx, t), "ticker": t,
-                     **price_stats[t], "roe": roe, "profit_margin": pm})
+                     **price_stats[t], "roe": roe, "profit_margin": pm, "short_float": sf, "inst_hold": ih})
 
     df = pd.DataFrame(rows)
     def norm(col):
@@ -543,7 +557,7 @@ def calc_multifactor(prices, meta, start_str, end_str):
         price_stats[t] = {**ps, "ann_vol": round(float(dr.std()*np.sqrt(252)*100), 2)}
 
     valid  = list(price_stats.keys())
-    FIELDS = ["returnOnEquity","profitMargins","priceToSalesTrailing12Months","beta"]
+    FIELDS = ["returnOnEquity","profitMargins","priceToSalesTrailing12Months","beta","shortPercentOfFloat","institutionsPercentHeld"]
     fundamentals = _parallel_info(valid, FIELDS, "基本面", 71, 95, workers=20)
 
     rows = []
@@ -556,6 +570,8 @@ def calc_multifactor(prices, meta, start_str, end_str):
             "profit_margin": round(fs["profitMargins"]*100, 2)            if fs.get("profitMargins")                 is not None else None,
             "ps":            round(fs["priceToSalesTrailing12Months"], 2) if fs.get("priceToSalesTrailing12Months")  is not None else None,
             "beta":          round(fs["beta"], 3)                         if fs.get("beta")                          is not None else None,
+            "short_float":   round(fs["shortPercentOfFloat"]*100, 1)      if fs.get("shortPercentOfFloat")           is not None else None,
+            "inst_hold":     round(fs["institutionsPercentHeld"]*100, 1)  if fs.get("institutionsPercentHeld")       is not None else None,
         })
 
     df = pd.DataFrame(rows)
@@ -737,6 +753,22 @@ def _ind_margin_debt(ctx):
         "dates": dates,
     }
 
+def _ind_gold(ctx):
+    """黄金期货 GC=F"""
+    s = ctx["dl1"]("GC=F")
+    s60d = s[s.index >= ctx["start_60d"]]
+    chg = float(s.iloc[-1] - s.iloc[-2]) if len(s) > 1 else None
+    dates = [str(d.date()) for d in s60d.index]
+    return _mk_with_trend(ctx["mk"], s.iloc[-1], chg, s, s60d, s, rnd=0, dates60d=dates)
+
+def _ind_oil(ctx):
+    """WTI 原油期货 CL=F"""
+    s = ctx["dl1"]("CL=F")
+    s60d = s[s.index >= ctx["start_60d"]]
+    chg = float(s.iloc[-1] - s.iloc[-2]) if len(s) > 1 else None
+    dates = [str(d.date()) for d in s60d.index]
+    return _mk_with_trend(ctx["mk"], s.iloc[-1], chg, s, s60d, s, rnd=1, dates60d=dates)
+
 # key / fn / weight / layer("tactical"/"strategic")
 _MARKET_INDICATORS = [
     ("vix",          _ind_vix,          3.0, "tactical"),
@@ -744,6 +776,8 @@ _MARKET_INDICATORS = [
     ("hy_spread",    _ind_hy_spread,     3.0, "tactical"),
     ("ad_ratio",     _ind_ad_ratio,      2.0, "tactical"),
     ("pct200",       _ind_pct200,        2.0, "tactical"),
+    ("gold",         _ind_gold,          0.0, "tactical"),   # 0 weight = 不计入温度
+    ("oil",          _ind_oil,           0.0, "tactical"),
     ("real_rate",    _ind_real_rate,     3.0, "strategic"),
     ("cape",         _ind_cape,          2.5, "strategic"),
     ("yield_spread", _ind_yield_spread,  2.0, "strategic"),
@@ -858,6 +892,68 @@ def api_market_stream():
                     headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
 
 
+# ─── 板块热力图 ────────────────────────────────────────────────────────────────
+# 11个SPDR ETF，拉60日日涨跌，返回 {sector, dates[], returns[]} 列表
+
+_SECTOR_ETFS = [
+    ("XLK",  "信息技术"),
+    ("XLV",  "医疗健康"),
+    ("XLF",  "金融"),
+    ("XLY",  "非必需消费"),
+    ("XLP",  "必需消费"),
+    ("XLE",  "能源"),
+    ("XLI",  "工业"),
+    ("XLU",  "公用事业"),
+    ("XLRE", "房地产"),
+    ("XLB",  "材料"),
+    ("XLC",  "通信服务"),
+]
+
+_sector_heatmap_cache = {"ts": 0, "data": None}
+_SECTOR_TTL = 3600
+
+@app.route("/api/sectors/heatmap")
+def api_sector_heatmap():
+    import time, yfinance as yf, pandas as pd, numpy as np
+    now = time.time()
+    if now - _sector_heatmap_cache["ts"] < _SECTOR_TTL and _sector_heatmap_cache["data"]:
+        return jsonify(_sector_heatmap_cache["data"])
+    try:
+        today = pd.Timestamp.today()
+        start = (today - pd.DateOffset(days=90)).strftime("%Y-%m-%d")  # 多拉30天保证有60交易日
+        tickers = [e[0] for e in _SECTOR_ETFS]
+        raw = yf.download(tickers, start=start, auto_adjust=True, progress=False)
+        close = raw["Close"] if "Close" in raw.columns else raw
+        if hasattr(close,"ndim") and close.ndim==1: close=close.to_frame(name=tickers[0])
+        close = close.dropna(how="all")
+
+        # 日涨跌幅 %
+        ret = close.pct_change().dropna(how="all") * 100
+        # 最近60个交易日
+        ret = ret.tail(60)
+        dates = [str(d.date()) for d in ret.index]
+
+        result = []
+        for ticker, name in _SECTOR_ETFS:
+            if ticker not in ret.columns: continue
+            s = ret[ticker]
+            vals = [round(float(v),2) if not np.isnan(v) else None for v in s]
+            # 近5日/20日/60日累计收益（用于趋势判断）
+            c5  = round(float((close[ticker].iloc[-1]/close[ticker].iloc[-6 ]-1)*100),2) if len(close)>=6  else None
+            c20 = round(float((close[ticker].iloc[-1]/close[ticker].iloc[-21]-1)*100),2) if len(close)>=21 else None
+            c60 = round(float((close[ticker].iloc[-1]/close[ticker].iloc[-61]-1)*100),2) if len(close)>=61 else None
+            result.append({
+                "ticker": ticker, "name": name,
+                "dates": dates, "returns": vals,
+                "cum5": c5, "cum20": c20, "cum60": c60,
+            })
+
+        data = {"sectors": result, "dates": dates}
+        _sector_heatmap_cache["ts"] = now
+        _sector_heatmap_cache["data"] = data
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 STRATEGIES = {
@@ -893,6 +989,7 @@ def api_detail(ticker):
             "52w_high":"fiftyTwoWeekHigh","52w_low":"fiftyTwoWeekLow",
             "analyst_target":"targetMeanPrice","recommendation":"recommendationKey",
             "short_name":"shortName","sector":"sector","industry":"industry",
+            "short_float":"shortPercentOfFloat","inst_hold":"institutionsPercentHeld",
         }.items()}
     except: pass
     return jsonify({"ticker": ticker, "prices": prices, "info": info})
