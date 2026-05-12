@@ -601,14 +601,32 @@ _market_cache = {"ts": 0, "data": None}
 _MARKET_TTL = 3600  # 1小时缓存
 
 # ─── 每个指标独立计算函数，供流式推送 ────────────────────────────────────────────
+# mk() 返回的 dict 额外包含 trend20: 20日变化方向 ("up"/"down"/"flat")
+
+def _trend20(series):
+    """最新值 vs 20交易日前，返回 up/down/flat"""
+    import numpy as np
+    s = series.dropna()
+    if len(s) < 21: return "flat"
+    chg = float(s.iloc[-1]) - float(s.iloc[-21])
+    thr = abs(float(s.iloc[-21])) * 0.02  # 2% 阈值判断 flat
+    if chg > thr:  return "up"
+    if chg < -thr: return "down"
+    return "flat"
+
+def _mk_with_trend(ctx_mk, val, chg, hist2y, hist60d, series_for_trend, rnd=2, dates60d=None):
+    out = ctx_mk(val, chg, hist2y, hist60d, rnd=rnd, dates60d=dates60d)
+    out["trend20"] = _trend20(series_for_trend)
+    return out
+
+# ── 战术层 ────────────────────────────────────────────────────────────────────
 
 def _ind_vix(ctx):
-    import pandas as pd
     s = ctx["dl1"]("^VIX")
     s60d = s[s.index >= ctx["start_60d"]]
     chg = float(s.iloc[-1] - s.iloc[-2]) if len(s) > 1 else None
     dates = [str(d.date()) for d in s60d.index]
-    return ctx["mk"](s.iloc[-1], chg, s, s60d, dates60d=dates)
+    return _mk_with_trend(ctx["mk"], s.iloc[-1], chg, s, s60d, s, dates60d=dates)
 
 def _ind_put_call(ctx):
     import re as _re, requests as req
@@ -623,22 +641,27 @@ def _ind_put_call(ctx):
     val = equity_pc or total_pc
     hist_ref = [0.35,0.40,0.45,0.50,0.55,0.60,0.65,0.70,0.75,0.80,0.85,0.90,0.95,1.00,1.10,1.20]
     return {
-        "value": round(val, 2) if val else None, "change": None,
+        "value": round(val, 2) if val else None, "change": None, "trend20": "flat",
         "percentile": _percentile_of(hist_ref, val) if val else None,
         "history": [], "dates": [],
         "note_extra": f"Total {total_pc}  ·  Equity {equity_pc}  ·  Index {index_pc}",
     }
 
-def _ind_aaii_bull(ctx):
-    import pandas as pd
-    iwm = ctx["dl1"]("IWM"); spy = ctx["dl1"]("SPY")
-    idx = iwm.index.intersection(spy.index)
-    ratio = (iwm[idx] / spy[idx]).dropna()
-    pct = ratio.rank(pct=True) * 100
-    s60d = pct[pct.index >= ctx["start_60d"]]
-    val = float(pct.iloc[-1])
-    chg = float(pct.iloc[-1] - pct.iloc[-2]) if len(pct) > 1 else None
-    return ctx["mk"](val, chg, pct, s60d, rnd=1)
+def _ind_hy_spread(ctx):
+    import numpy as np
+    s2y, s60d, dates = ctx["fred"]("BAMLH0A0HYM2")
+    val_bps = float(s2y.iloc[-1]) * 100
+    chg_bps = float(s2y.iloc[-1] - s2y.iloc[-2]) * 100 if len(s2y) > 1 else None
+    h2_bps  = [v*100 for v in s2y.tolist()]
+    h60_bps = [v*100 for v in s60d.tolist()]
+    s_bps = s2y * 100
+    return {
+        "value": round(val_bps, 0), "change": round(chg_bps, 0) if chg_bps else None,
+        "trend20": _trend20(s_bps),
+        "percentile": _percentile_of(h2_bps, val_bps),
+        "history": [round(v, 0) for v in h60_bps],
+        "dates": dates,
+    }
 
 def _ind_ad_ratio(ctx):
     import pandas as pd
@@ -648,57 +671,7 @@ def _ind_ad_ratio(ctx):
     ma5 = ratio.rolling(5).mean().dropna()
     s60d = ma5[ma5.index >= ctx["start_60d"]]
     chg = float(ma5.iloc[-1] - ma5.iloc[-2]) if len(ma5) > 1 else None
-    return ctx["mk"](ma5.iloc[-1], chg, ma5, s60d, rnd=4)
-
-def _ind_mcclell(ctx):
-    import pandas as pd
-    rsp = ctx["dl1"]("RSP"); spy = ctx["dl1"]("SPY")
-    idx = rsp.index.intersection(spy.index)
-    net = (rsp[idx] - spy[idx] * (rsp[idx].iloc[0] / spy[idx].iloc[0])).dropna()
-    ema19 = net.ewm(span=19, adjust=False).mean()
-    ema39 = net.ewm(span=39, adjust=False).mean()
-    mcl = (ema19 - ema39).dropna()
-    s60d = mcl[mcl.index >= ctx["start_60d"]]
-    chg = float(mcl.iloc[-1] - mcl.iloc[-2]) if len(mcl) > 1 else None
-    return ctx["mk"](mcl.iloc[-1], chg, mcl, s60d, rnd=2)
-
-def _ind_nh_nl(ctx):
-    import pandas as pd
-    qqq = ctx["dl1"]("QQQ"); iwm = ctx["dl1"]("IWM")
-    idx = qqq.index.intersection(iwm.index)
-    hi52_qqq = qqq[idx].rolling(252).max()
-    hi52_iwm = iwm[idx].rolling(252).max()
-    ratio = ((qqq[idx]/hi52_qqq) / (iwm[idx]/hi52_iwm)).dropna()
-    s60d = ratio[ratio.index >= ctx["start_60d"]]
-    chg = float(ratio.iloc[-1] - ratio.iloc[-2]) if len(ratio) > 1 else None
-    return ctx["mk"](ratio.iloc[-1], chg, ratio, s60d, rnd=3)
-
-def _ind_ndx_pe(ctx):
-    import yfinance as yf
-    pe = _safe(yf.Ticker("QQQ").info.get("trailingPE"))
-    hist_ref = [15,18,20,22,24,26,28,30,32,35,38,40,42,45]
-    return {
-        "value": round(float(pe), 1) if pe else None, "change": None,
-        "percentile": _percentile_of(hist_ref, pe) if pe else None,
-        "history": [],
-    }
-
-def _ind_cape(ctx):
-    import pandas as pd
-    df = pd.read_excel("http://www.econ.yale.edu/~shiller/data/ie_data.xls",
-                       sheet_name="Data", skiprows=7, engine="xlrd")
-    cape = pd.to_numeric(df["CAPE"], errors="coerce").dropna().tail(300).tolist()
-    val = cape[-1] if cape else None
-    return {
-        "value": round(float(val), 1) if val else None, "change": None,
-        "percentile": _percentile_of([round(v,1) for v in cape], val) if val else None,
-        "history": [round(v,1) for v in cape[-24:]],
-    }
-
-def _ind_yield_spread(ctx):
-    s2y, s60d, dates = ctx["fred"]("T10Y2Y")
-    chg = float(s2y.iloc[-1] - s2y.iloc[-2]) if len(s2y) > 1 else None
-    return ctx["mk"](s2y.iloc[-1], chg, s2y, s60d, rnd=2, dates60d=dates)
+    return _mk_with_trend(ctx["mk"], ma5.iloc[-1], chg, ma5, s60d, ma5, rnd=4)
 
 def _ind_pct200(ctx):
     import pandas as pd
@@ -714,62 +687,68 @@ def _ind_pct200(ctx):
     combined = pd.concat(scores.values(), axis=1).mean(axis=1).dropna() * 100
     s60d = combined[combined.index >= ctx["start_60d"]]
     chg = float(combined.iloc[-1] - combined.iloc[-2]) if len(combined) > 1 else None
-    return ctx["mk"](combined.iloc[-1], chg, combined, s60d, rnd=1)
+    return _mk_with_trend(ctx["mk"], combined.iloc[-1], chg, combined, s60d, combined, rnd=1)
 
-def _ind_qqq_flow(ctx):
-    import yfinance as yf, pandas as pd
-    raw = yf.download("QQQ", start=ctx["start_60d"], auto_adjust=True, progress=False)
-    prices = raw["Close"].dropna()
-    volume = raw["Volume"].dropna()
-    if hasattr(prices,"ndim") and prices.ndim==2: prices=prices.iloc[:,0]
-    if hasattr(volume,"ndim") and volume.ndim==2: volume=volume.iloc[:,0]
-    flow = (prices * volume / 1e8).dropna()
-    flow3 = flow.rolling(3).sum().dropna()
-    chg = float(flow3.iloc[-1] - flow3.iloc[-2]) if len(flow3) > 1 else None
-    return ctx["mk"](flow3.iloc[-1], chg, flow3, flow3, rnd=1)
+# ── 战略层 ────────────────────────────────────────────────────────────────────
 
-def _ind_hy_spread(ctx):
-    import numpy as np
-    s2y, s60d, dates = ctx["fred"]("BAMLH0A0HYM2")
-    val_bps = float(s2y.iloc[-1]) * 100
-    chg_bps = float(s2y.iloc[-1] - s2y.iloc[-2]) * 100 if len(s2y) > 1 else None
-    h2_bps  = [v*100 for v in s2y.tolist()]
-    h60_bps = [v*100 for v in s60d.tolist()]
+def _ind_real_rate(ctx):
+    """实际利率：FRED DFII10（10年期 TIPS 收益率，%）"""
+    s2y, s60d, dates = ctx["fred"]("DFII10")
+    chg = float(s2y.iloc[-1] - s2y.iloc[-2]) if len(s2y) > 1 else None
+    return _mk_with_trend(ctx["mk"], s2y.iloc[-1], chg, s2y, s60d, s2y, rnd=2, dates60d=dates)
+
+def _ind_cape(ctx):
+    import pandas as pd
+    df = pd.read_excel("http://www.econ.yale.edu/~shiller/data/ie_data.xls",
+                       sheet_name="Data", skiprows=7, engine="xlrd")
+    cape = pd.to_numeric(df["CAPE"], errors="coerce").dropna().tail(300)
+    val = float(cape.iloc[-1])
     return {
-        "value": round(val_bps, 0), "change": round(chg_bps, 0) if chg_bps else None,
-        "percentile": _percentile_of(h2_bps, val_bps),
-        "history": [round(v, 0) for v in h60_bps],
-        "dates": dates,
+        "value": round(val, 1), "change": None,
+        "trend20": _trend20(cape),
+        "percentile": _percentile_of(cape.tolist(), val),
+        "history": [round(v,1) for v in cape.iloc[-24:].tolist()],
     }
+
+def _ind_yield_spread(ctx):
+    s2y, s60d, dates = ctx["fred"]("T10Y2Y")
+    chg = float(s2y.iloc[-1] - s2y.iloc[-2]) if len(s2y) > 1 else None
+    return _mk_with_trend(ctx["mk"], s2y.iloc[-1], chg, s2y, s60d, s2y, rnd=2, dates60d=dates)
+
+def _ind_dxy(ctx):
+    """美元指数 DX-Y.NYB"""
+    import pandas as pd
+    s = ctx["dl1"]("DX-Y.NYB")
+    s60d = s[s.index >= ctx["start_60d"]]
+    chg = float(s.iloc[-1] - s.iloc[-2]) if len(s) > 1 else None
+    dates = [str(d.date()) for d in s60d.index]
+    return _mk_with_trend(ctx["mk"], s.iloc[-1], chg, s, s60d, s, rnd=1, dates60d=dates)
 
 def _ind_margin_debt(ctx):
     s2y, s60d, dates = ctx["fred"]("BOGMBBM")
     val = float(s2y.iloc[-1]) * 10
     chg = float(s2y.iloc[-1] - s2y.iloc[-2]) * 10 if len(s2y) > 1 else None
-    h2  = [v*10 for v in s2y.tolist()]
-    h60 = [v*10 for v in s60d.tolist()]
+    h2  = s2y * 10; h60 = s60d * 10
     return {
         "value": round(val, 0), "change": round(chg, 0) if chg else None,
-        "percentile": _percentile_of(h2, val),
-        "history": [round(v, 0) for v in h60],
+        "trend20": _trend20(h2),
+        "percentile": _percentile_of(h2.tolist(), val),
+        "history": [round(v, 0) for v in h60.tolist()],
         "dates": dates,
     }
 
-# 顺序 & 权重（weight 用于温度计加权，proxy=True 表示代理指标）
+# key / fn / weight / layer("tactical"/"strategic")
 _MARKET_INDICATORS = [
-    ("vix",          _ind_vix,          3.0, False),
-    ("put_call",     _ind_put_call,      2.0, False),
-    ("aaii_bull",    _ind_aaii_bull,     0.5, True),
-    ("ad_ratio",     _ind_ad_ratio,      1.5, False),
-    ("mcclell",      _ind_mcclell,       0.5, True),
-    ("nh_nl",        _ind_nh_nl,         0.5, True),
-    ("ndx_pe",       _ind_ndx_pe,        2.0, False),
-    ("cape",         _ind_cape,          2.5, False),
-    ("yield_spread", _ind_yield_spread,  2.0, False),
-    ("pct200",       _ind_pct200,        2.0, False),
-    ("qqq_flow",     _ind_qqq_flow,      1.5, False),
-    ("hy_spread",    _ind_hy_spread,     3.0, False),
-    ("margin_debt",  _ind_margin_debt,   1.0, False),
+    ("vix",          _ind_vix,          3.0, "tactical"),
+    ("put_call",     _ind_put_call,      2.5, "tactical"),
+    ("hy_spread",    _ind_hy_spread,     3.0, "tactical"),
+    ("ad_ratio",     _ind_ad_ratio,      2.0, "tactical"),
+    ("pct200",       _ind_pct200,        2.0, "tactical"),
+    ("real_rate",    _ind_real_rate,     3.0, "strategic"),
+    ("cape",         _ind_cape,          2.5, "strategic"),
+    ("yield_spread", _ind_yield_spread,  2.0, "strategic"),
+    ("dxy",          _ind_dxy,           2.0, "strategic"),
+    ("margin_debt",  _ind_margin_debt,   1.5, "strategic"),
 ]
 
 def _build_ctx():

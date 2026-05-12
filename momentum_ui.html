@@ -435,20 +435,14 @@ tr.selected td:first-child{border-left:2px solid var(--accent);padding-left:10px
   </div>
 
   <div>
-    <div class="dash-section-title">情绪 &amp; 广度</div>
-    <div class="dash-grid" id="dg-sentiment">
+    <div class="dash-section-title">战术层 · 1-3个月</div>
+    <div class="dash-grid" id="dg-tactical">
       <div class="dash-loading"><div class="spinner"></div>加载中…</div>
     </div>
   </div>
   <div>
-    <div class="dash-section-title">估值 &amp; 利率</div>
-    <div class="dash-grid" id="dg-valuation">
-      <div class="dash-loading"><div class="spinner"></div>加载中…</div>
-    </div>
-  </div>
-  <div>
-    <div class="dash-section-title">资金 &amp; 流动性</div>
-    <div class="dash-grid" id="dg-flow">
+    <div class="dash-section-title">战略层 · 6-18个月</div>
+    <div class="dash-grid" id="dg-strategic">
       <div class="dash-loading"><div class="spinner"></div>加载中…</div>
     </div>
   </div>
@@ -605,34 +599,30 @@ function setView(v) {
 // ── dashboard data & render ───────────────────────────────────────────────────
 let dashLoaded = false;
 
-// weight: 温度计加权; proxy: 是否代理指标（卡片加 ≈ 标注，计分降权已含在weight里）
+// weight: 温度计加权; layer: tactical(1-3月) / strategic(6-18月)
 const INDICATORS = [
-  { key:'vix',         name:'VIX 恐慌指数',         unit:'',    group:'sentiment', warn:'high',  weight:3.0, proxy:false,
-    note:'>30 恐慌区（反向低吸），<15 过度乐观' },
-  { key:'put_call',    name:'Put/Call Ratio',        unit:'',    group:'sentiment', warn:'low',   weight:2.0, proxy:false,
+  // ── 战术层 ──────────────────────────────────────────────────────────────
+  { key:'vix',         name:'VIX 恐慌指数',        unit:'',    layer:'tactical',  warn:'high',  weight:3.0,
+    note:'>30 恐慌/底部区，<15 过度乐观；关注方向' },
+  { key:'put_call',    name:'Put/Call Ratio',       unit:'',    layer:'tactical',  warn:'low',   weight:2.5,
     note:'<0.7 过度乐观预警，>1.2 恐慌底部区' },
-  { key:'aaii_bull',   name:'AAII 散户情绪',         unit:'%',   group:'sentiment', warn:'high',  weight:0.5, proxy:true,
-    note:'>55% 历史高位，反向止盈信号' },
-  { key:'ad_ratio',    name:'涨跌家数比（5日均）',   unit:'',    group:'sentiment', warn:'low',   weight:1.5, proxy:false,
-    note:'<0.8 市场内部走弱，>1.2 强势扩散' },
-  { key:'mcclell',     name:'McClellan Oscillator',  unit:'',    group:'sentiment', warn:'both',  weight:0.5, proxy:true,
-    note:'>100 短期超买，<-100 短期超卖' },
-  { key:'nh_nl',       name:'52周新高/新低比',       unit:'',    group:'sentiment', warn:'low',   weight:0.5, proxy:true,
-    note:'持续<1 说明市场内部已恶化' },
-  { key:'ndx_pe',      name:'纳指 PE（TTM）',        unit:'x',   group:'valuation', warn:'high',  weight:2.0, proxy:false,
-    note:'>35x 历史偏贵，<20x 相对低估' },
-  { key:'cape',        name:'标普500 CAPE',          unit:'x',   group:'valuation', warn:'high',  weight:2.5, proxy:false,
-    note:'>35 历史极值区，Shiller PE' },
-  { key:'yield_spread',name:'10Y-2Y 利差',           unit:'%',   group:'valuation', warn:'low',   weight:2.0, proxy:false,
-    note:'倒挂修复过程常伴随衰退风险' },
-  { key:'pct200',      name:'标普500>200均线占比',   unit:'%',   group:'valuation', warn:'low',   weight:2.0, proxy:false,
-    note:'<40% 市场内部显著走弱' },
-  { key:'qqq_flow',    name:'QQQ 3日资金净流向',     unit:'亿$', group:'flow',      warn:'both',  weight:1.5, proxy:false,
-    note:'持续流出预警，持续流入确认趋势' },
-  { key:'hy_spread',   name:'垃圾债信用利差',         unit:'bps', group:'flow',      warn:'high',  weight:3.0, proxy:false,
-    note:'>500bps 信用市场压力' },
-  { key:'margin_debt', name:'保证金债务余额',         unit:'亿$', group:'flow',      warn:'high',  weight:1.0, proxy:false,
-    note:'快速下降常领先大盘下跌（月度）' },
+  { key:'hy_spread',   name:'信用利差（HY）',       unit:'bps', layer:'tactical',  warn:'high',  weight:3.0,
+    note:'>500bps 信用市场压力，领先股市 2-4 周' },
+  { key:'ad_ratio',    name:'市场广度（RSP/SPY）',  unit:'',    layer:'tactical',  warn:'low',   weight:2.0,
+    note:'等权/市值权重比，<1 说明涨势集中在少数大盘股' },
+  { key:'pct200',      name:'>200均线占比',         unit:'%',   layer:'tactical',  warn:'low',   weight:2.0,
+    note:'<40% 市场内部显著走弱，>70% 趋势健康' },
+  // ── 战略层 ──────────────────────────────────────────────────────────────
+  { key:'real_rate',   name:'实际利率（TIPS 10Y）', unit:'%',   layer:'strategic', warn:'high',  weight:3.0,
+    note:'>2% 压制成长股估值；上升趋势 = 折现率上行' },
+  { key:'cape',        name:'CAPE（Shiller PE）',   unit:'x',   layer:'strategic', warn:'high',  weight:2.5,
+    note:'>35x 历史极值区；与未来10年收益率高度负相关' },
+  { key:'yield_spread',name:'10Y-2Y 利差',          unit:'%',   layer:'strategic', warn:'low',   weight:2.0,
+    note:'倒挂→修复过渡期常伴随衰退；关注斜率变化' },
+  { key:'dxy',         name:'美元指数（DXY）',      unit:'',    layer:'strategic', warn:'high',  weight:2.0,
+    note:'强美元压制美股国际收入及新兴市场资产' },
+  { key:'margin_debt', name:'保证金债务',            unit:'亿$', layer:'strategic', warn:'high',  weight:1.5,
+    note:'快速下降常领先大盘下跌 1-3 个月（月度数据）' },
 ];
 
 // skeleton card while loading
@@ -772,18 +762,25 @@ function renderDashCard(ind, d) {
       </div>
     </div>` : '';
   const spark = hist.length >= 2 ? `<div class="spark-wrap"><canvas id="sp-${ind.key}"></canvas></div>` : '';
-  const proxyBadge = ind.proxy
-    ? `<span title="代理指标（非原始数据）" style="font-size:10px;color:var(--text3);background:var(--surface2);border:1px solid var(--border);border-radius:3px;padding:1px 5px;margin-left:4px;cursor:default">≈ 近似</span>` : '';
+  // trend arrow: direction that is "dangerous" for this indicator
+  const trendRaw = d?.trend20 ?? 'flat';
+  // warn:'high' → up=bad(red), down=good(green); warn:'low' → down=bad(red), up=good(green)
+  const trendColor = trendRaw==='flat' ? 'var(--text3)'
+    : (ind.warn==='high' ? (trendRaw==='up'?'var(--red)':'var(--green)')
+                         : (trendRaw==='down'?'var(--red)':'var(--green)'));
+  const trendArrow = trendRaw==='up' ? '↑' : trendRaw==='down' ? '↓' : '→';
+  const trendHtml = `<span title="20日趋势" style="font-size:13px;font-weight:700;color:${trendColor};margin-left:6px">${trendArrow}</span>`;
   return `
     <div class="icard ${cCls}">
       <div class="icard-top">
-        <span class="icard-name">${ind.name}${proxyBadge}</span>
+        <span class="icard-name">${ind.name}</span>
         <span class="ibadge ${bCls}">${label}</span>
       </div>
       <div class="icard-val">
         <span class="iv-main" ${valColor}>${val??'—'}</span>
         ${ind.unit?`<span class="iv-unit">${ind.unit}</span>`:''}
         ${chgHtml}
+        ${trendHtml}
       </div>
       ${pctBar}
       ${spark}
@@ -792,11 +789,10 @@ function renderDashCard(ind, d) {
 }
 
 function renderDashboard(data) {
-  const groups = {sentiment:'', valuation:'', flow:''};
-  INDICATORS.forEach(ind => { groups[ind.group] += renderDashCard(ind, data[ind.key] || {}); });
-  document.getElementById('dg-sentiment').innerHTML = groups.sentiment;
-  document.getElementById('dg-valuation').innerHTML = groups.valuation;
-  document.getElementById('dg-flow').innerHTML      = groups.flow;
+  const layers = {tactical:'', strategic:''};
+  INDICATORS.forEach(ind => { layers[ind.layer] += renderDashCard(ind, data[ind.key] || {}); });
+  document.getElementById('dg-tactical').innerHTML  = layers.tactical;
+  document.getElementById('dg-strategic').innerHTML = layers.strategic;
   INDICATORS.forEach(ind => {
     const c = document.getElementById('sp-' + ind.key);
     const d = data[ind.key];
@@ -816,7 +812,8 @@ function updateSummary(data) {
     const c = pctColor(d.percentile, ind.warn);
     const raw = c==='red'?100:c==='amber'?55:15;
     wScore += raw * ind.weight; wTotal += ind.weight;
-    const short = ind.name.split('（')[0].split(' ')[0];
+    // short label: use first 4 chars or before （/space
+    const short = ind.name.replace('（','(').split('(')[0].split(' ')[0].slice(0,6);
     if (c==='red') reds.push(short);
     else if (c==='amber') ambers.push(short);
   });
@@ -840,7 +837,7 @@ function updateSummary(data) {
 function updateCard(key, d) {
   const ind = INDICATORS.find(i=>i.key===key);
   if (!ind) return;
-  const grid = document.getElementById('dg-'+ind.group);
+  const grid = document.getElementById('dg-'+ind.layer);
   if (!grid) return;
   // replace skeleton or existing card
   const existing = grid.querySelector(`[data-key="${key}"]`);
@@ -867,12 +864,10 @@ async function loadDashboard(force=false) {
   _dashData = {};
 
   // show skeletons immediately
-  const sentimentKeys = INDICATORS.filter(i=>i.group==='sentiment');
-  const valuationKeys = INDICATORS.filter(i=>i.group==='valuation');
-  const flowKeys      = INDICATORS.filter(i=>i.group==='flow');
-  document.getElementById('dg-sentiment').innerHTML = sentimentKeys.map(i=>`<div data-key="${i.key}">${skeletonCard()}</div>`).join('');
-  document.getElementById('dg-valuation').innerHTML = valuationKeys.map(i=>`<div data-key="${i.key}">${skeletonCard()}</div>`).join('');
-  document.getElementById('dg-flow').innerHTML      = flowKeys.map(i=>`<div data-key="${i.key}">${skeletonCard()}</div>`).join('');
+  const tacticalKeys  = INDICATORS.filter(i=>i.layer==='tactical');
+  const strategicKeys = INDICATORS.filter(i=>i.layer==='strategic');
+  document.getElementById('dg-tactical').innerHTML  = tacticalKeys.map(i=>`<div data-key="${i.key}">${skeletonCard()}</div>`).join('');
+  document.getElementById('dg-strategic').innerHTML = strategicKeys.map(i=>`<div data-key="${i.key}">${skeletonCard()}</div>`).join('');
 
   document.getElementById('dashRefreshBtn').disabled = true;
 
