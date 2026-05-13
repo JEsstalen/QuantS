@@ -373,6 +373,12 @@ tr.selected td:first-child{border-left:2px solid var(--accent);padding-left:10px
     <button class="stab" id="stab-multifactor" onclick="setStrategy('multifactor')">
       🧮 多因子 <span class="stab-badge">Z-Score</span>
     </button>
+    <button class="stab" id="stab-high52w" onclick="setStrategy('high52w')">
+      🚀 52周新高 <span class="stab-badge">George 2004</span>
+    </button>
+    <button class="stab" id="stab-connors_rsi" onclick="setStrategy('connors_rsi')">
+      ⚡ Connors RSI(2) <span class="stab-badge">短线超卖</span>
+    </button>
   </div>
 
   <!-- filter bar -->
@@ -538,6 +544,16 @@ const STRAT_META = {
     sortKey: "mf_score", sortAsc: false,
     cols: ["rank","ticker","sector","price","mf_score","mom_mean","roe","profit_margin","beta","ps","short_float","inst_hold"],
   },
+  high52w: {
+    desc: "George & Hwang 2004（JoF）：距52周高点越近的股票未来半年至一年持续走强；双重过滤=200日均线之上+正向月动量",
+    sortKey: "dist_high", sortAsc: false,
+    cols: ["rank","ticker","sector","price","dist_high","passed","high_52w","from_low","above_ma200","mom_mean"],
+  },
+  connors_rsi: {
+    desc: "Larry Connors 短线 mean reversion：200日均线之上+RSI(2)<5 极度超卖→反弹至5日均线之上卖出；持有 2-5 天",
+    sortKey: "rsi2", sortAsc: true,
+    cols: ["rank","ticker","sector","price","signal","rsi2","rsi14","from_ma200","ma5","above_ma200"],
+  },
 };
 
 const COL_DEF = {
@@ -595,6 +611,32 @@ const COL_DEF = {
   ps:           { label:"P/S",          fmt:(v)=>v!=null?`<span class="num neu">${v}</span>`:'<span class="neu">—</span>' },
   short_float:  { label:'空头比%',      fmt:(v)=>v!=null?`<span class="num ${v>10?'neg':v<5?'pos':'neu'}">${v}%</span>`:'<span class="neu">—</span>' },
   inst_hold:    { label:'机构持仓%',    fmt:(v)=>v!=null?`<span class="num">${v}%</span>`:'<span class="neu">—</span>' },
+  // 52W high
+  dist_high:    { label:'距52W高%',     fmt:(v)=>{
+    if(v==null) return '<span class="neu">—</span>';
+    const c = v>-3?'pos':v>-10?'neu':'neg';
+    return `<span class="num ${c}" style="font-weight:700">${v}%</span>`;
+  }},
+  high_52w:     { label:'52W高',        fmt:(v)=>v!=null?`<span class="num neu">$${v}</span>`:'—' },
+  from_low:     { label:'距52W低%',     fmt:(v)=>v!=null?`<span class="num pos">+${v}%</span>`:'—' },
+  above_ma200:  { label:'>MA200',       fmt:(v)=>v?'<span style="color:var(--green);font-weight:700;font-size:12px">✓</span>':'<span style="color:var(--red);font-size:12px">✗</span>' },
+  passed:       { label:'双重过滤',     fmt:(v)=>v?'<span style="color:var(--green);font-weight:700;font-size:12px">✓ 通过</span>':'<span style="color:var(--red);font-size:12px">✗ 未通过</span>' },
+  // Connors RSI
+  rsi2:         { label:'RSI(2)',       fmt:(v)=>{
+    if(v==null) return '<span class="neu">—</span>';
+    const c = v<5?'pos':v<10?'neu':v>90?'neg':'neu';
+    const weight = v<10?'700':'400';
+    return `<span class="num ${c}" style="font-weight:${weight}">${v}</span>`;
+  }},
+  rsi14:        { label:'RSI(14)',      fmt:(v)=>v!=null?`<span class="num neu">${v}</span>`:'—' },
+  ma5:          { label:'MA5',          fmt:(v)=>v!=null?`<span class="num neu">$${v}</span>`:'—' },
+  ma200:        { label:'MA200',        fmt:(v)=>v!=null?`<span class="num neu">$${v}</span>`:'—' },
+  from_ma200:   { label:'距MA200%',     fmt:(v)=>{
+    if(v==null) return '—';
+    const c = v>0?'pos':'neg';
+    return `<span class="num ${c}">${v>0?'+':''}${v}%</span>`;
+  }},
+  signal:       { label:'入场信号',     fmt:(v)=>v?'<span style="color:var(--green);font-weight:700;font-size:12px">✓ 买入</span>':'<span style="color:var(--text3);font-size:12px">—</span>' },
 };
 
 function fPips(v, total) {
@@ -1092,7 +1134,7 @@ function renderTable() {
 }
 
 function doSort(col){
-  const naturalAsc = ['beta','ann_vol','rank','rf_hurdle','ps'].includes(col);
+  const naturalAsc = ['beta','ann_vol','rank','rf_hurdle','ps','rsi2','rsi14'].includes(col);
   sortAsc = sortCol===col ? !sortAsc : naturalAsc;
   sortCol=col; renderTable();
 }
@@ -1197,6 +1239,38 @@ function renderDetail({info,prices}, row) {
         <div class="stat-val ${(row.roa??0)>=0?'g':'r'}">${row.roa??'—'}%</div></div>
       <div class="stat-card"><div class="stat-lbl">毛利率</div>
         <div class="stat-val g">${row.gross_margin??'—'}%</div></div>`;
+  } else if(strategy==='high52w'){
+    const dh=row.dist_high; const dhC=(dh??0)>-3?'g':(dh??0)>-10?'a':'r';
+    stratCards=`
+      <div class="stat-card" style="grid-column:span 2">
+        <div class="stat-lbl">距 52周高点</div>
+        <div class="stat-val ${dhC}" style="font-size:22px">${dh??'—'}%</div>
+      </div>
+      <div class="stat-card"><div class="stat-lbl">52周高</div>
+        <div class="stat-val">$${row.high_52w??'—'}</div></div>
+      <div class="stat-card"><div class="stat-lbl">距52周低</div>
+        <div class="stat-val g">+${row.from_low??'—'}%</div></div>
+      <div class="stat-card"><div class="stat-lbl">>200日均线</div>
+        <div class="stat-val ${row.above_ma200?'g':'r'}">${row.above_ma200?'✓ 是':'✗ 否'}</div></div>
+      <div class="stat-card"><div class="stat-lbl">月均动量</div>
+        <div class="stat-val ${mc}">${(row.mom_mean||0)>0?'+':''}${row.mom_mean??'—'}%</div></div>`;
+  } else if(strategy==='connors_rsi'){
+    const r2=row.rsi2; const r2C=(r2??50)<5?'g':(r2??50)<10?'a':(r2??50)>90?'r':'a';
+    stratCards=`
+      <div class="stat-card" style="grid-column:span 2">
+        <div class="stat-lbl">入场信号 · Connors</div>
+        <div class="stat-val ${row.signal?'g':'a'}" style="font-size:15px">
+          ${row.signal?'✓ 买入信号 — 趋势向上 + 极度超卖':row.above_ma200?'— 暂无信号（未到超卖区）':'✗ 不符合（200日均线之下）'}
+        </div>
+      </div>
+      <div class="stat-card"><div class="stat-lbl">RSI(2)</div>
+        <div class="stat-val ${r2C}">${r2??'—'}</div></div>
+      <div class="stat-card"><div class="stat-lbl">RSI(14)</div>
+        <div class="stat-val">${row.rsi14??'—'}</div></div>
+      <div class="stat-card"><div class="stat-lbl">距 MA200</div>
+        <div class="stat-val ${(row.from_ma200||0)>=0?'g':'r'}">${(row.from_ma200||0)>0?'+':''}${row.from_ma200??'—'}%</div></div>
+      <div class="stat-card"><div class="stat-lbl">MA5（卖出参考）</div>
+        <div class="stat-val">$${row.ma5??'—'}</div></div>`;
   } else if(strategy==='multifactor'){
     const mfSc=row.mf_score; const mfFc=mfSc>0.3?'g':mfSc<-0.3?'r':'a';
     stratCards=`

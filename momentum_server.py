@@ -956,6 +956,128 @@ def api_sector_heatmap():
         return jsonify({"error": str(e)}), 500
 
 
+# ─── 策略 7：52周新高动量（George & Hwang 2004, JoF）───────────────────────────
+# 距离52周高点的接近度本身就是动量信号，比传统动量更稳定
+# 规则：dist_52w_high < 5% → 强势；同时要求 200日均线之上 + 正向月动量
+
+def calc_52w_high(prices, meta, start_str, end_str):
+    import pandas as pd, numpy as np
+    meta_idx = meta.set_index("Ticker")
+
+    results, total = [], len(prices.columns)
+    for idx, ticker in enumerate(prices.columns):
+        if idx % 30 == 0: log(f"计算52W新高接近度 {idx}/{total}…", 58 + int(idx/total*35))
+        s = prices[ticker].dropna()
+        if len(s) < 252: continue
+
+        last = float(s.iloc[-1])
+        high_52w = float(s.tail(252).max())
+        low_52w  = float(s.tail(252).min())
+        # 距离52周高点（%，越接近0越强）
+        dist_high = round((last/high_52w - 1)*100, 2)
+        # 距52周低点（%）
+        from_low  = round((last/low_52w - 1)*100, 2)
+        # 200日均线
+        ma200 = float(s.tail(200).mean()) if len(s) >= 200 else None
+        above_ma200 = ma200 is not None and last > ma200
+        # 月度动量（次级筛选）
+        ps = _monthly_stats(prices, ticker)
+        mom = ps["mom_mean"] if ps else None
+        # 双重过滤：在200日均线之上 AND 月动量为正
+        passed = bool(above_ma200 and (mom is not None and mom > 0))
+
+        results.append({
+            **_meta_info(meta_idx, ticker), "ticker": ticker,
+            "price":      round(last, 2),
+            "high_52w":   round(high_52w, 2),
+            "low_52w":    round(low_52w, 2),
+            "dist_high":  dist_high,      # 越接近0越好（负数）
+            "from_low":   from_low,
+            "above_ma200": above_ma200,
+            "mom_mean":   ps["mom_mean"] if ps else None,
+            "total_ret":  ps["total_ret"] if ps else None,
+            "max_dd":     ps["max_dd"] if ps else None,
+            "passed":     passed,
+        })
+
+    df = pd.DataFrame(results)
+    # 排序：先按通过过滤排，通过的内部按距高点近排��dist_high 越接近0越前）
+    df["_sort"] = df["dist_high"].where(df["passed"], other=-9999)
+    df = df.sort_values("_sort", ascending=False).drop(columns=["_sort"]).reset_index(drop=True)
+    df.insert(0, "rank", range(1, len(df)+1))
+    log("计算完成", 100)
+    return df
+
+# ─── 策略 8：Connors RSI(2) 超卖反弹（Larry Connors）─────────────────────────
+# 短线 mean reversion：200日均线之上（趋势过滤）+ RSI(2) 极低（极度超卖）
+# 标准入场：RSI(2) < 5；放宽到 < 10 进入观察名单
+
+def _rsi(series, n):
+    import pandas as pd
+    delta = series.diff()
+    up = delta.clip(lower=0)
+    dn = -delta.clip(upper=0)
+    # Wilder's smoothing — 用 Connors 原版（简单平均）
+    avg_up = up.rolling(n).mean()
+    avg_dn = dn.rolling(n).mean()
+    rs = avg_up / avg_dn.replace(0, 1e-12)
+    return 100 - 100/(1+rs)
+
+def calc_connors_rsi(prices, meta, start_str, end_str):
+    import pandas as pd, numpy as np
+    meta_idx = meta.set_index("Ticker")
+
+    results, total = [], len(prices.columns)
+    for idx, ticker in enumerate(prices.columns):
+        if idx % 30 == 0: log(f"计算 Connors RSI {idx}/{total}…", 58 + int(idx/total*35))
+        s = prices[ticker].dropna()
+        if len(s) < 200: continue
+
+        last = float(s.iloc[-1])
+        ma200 = float(s.tail(200).mean())
+        ma5   = float(s.tail(5).mean())
+        above_ma200 = last > ma200
+
+        rsi2  = _rsi(s, 2)
+        rsi14 = _rsi(s, 14)
+        last_rsi2  = float(rsi2.iloc[-1])  if not pd.isna(rsi2.iloc[-1])  else None
+        last_rsi14 = float(rsi14.iloc[-1]) if not pd.isna(rsi14.iloc[-1]) else None
+
+        # Connors 标准信号：200日均线上 + RSI(2) < 5
+        signal = bool(above_ma200 and last_rsi2 is not None and last_rsi2 < 5)
+        # 观察名单：RSI(2) < 10
+        watchlist = bool(above_ma200 and last_rsi2 is not None and last_rsi2 < 10)
+
+        # 距 200日均线（%）— 用来评估趋势强度
+        from_ma200 = round((last/ma200 - 1)*100, 2)
+
+        results.append({
+            **_meta_info(meta_idx, ticker), "ticker": ticker,
+            "price":       round(last, 2),
+            "rsi2":        round(last_rsi2, 1)  if last_rsi2  is not None else None,
+            "rsi14":       round(last_rsi14, 1) if last_rsi14 is not None else None,
+            "ma5":         round(ma5, 2),
+            "ma200":       round(ma200, 2),
+            "from_ma200":  from_ma200,
+            "above_ma200": above_ma200,
+            "signal":      signal,
+            "watchlist":   watchlist,
+        })
+
+    df = pd.DataFrame(results)
+    # 排序：signal 优先 → watchlist → 其它；同一档内按 rsi2 升序（越超卖越前）
+    def _bucket(r):
+        if r["signal"]:    return 2
+        if r["watchlist"]: return 1
+        return 0
+    df["_bucket"] = df.apply(_bucket, axis=1)
+    df["_rsi"]    = df["rsi2"].fillna(999)
+    df = df.sort_values(["_bucket","_rsi"], ascending=[False, True]).drop(columns=["_bucket","_rsi"]).reset_index(drop=True)
+    df.insert(0, "rank", range(1, len(df)+1))
+    log("计算完成", 100)
+    return df
+
+
 STRATEGIES = {
     "momentum":         calc_momentum,
     "momentum_quality": calc_momentum_quality,
@@ -963,6 +1085,8 @@ STRATEGIES = {
     "piotroski":        calc_piotroski,
     "dual_momentum":    calc_dual_momentum,
     "multifactor":      calc_multifactor,
+    "high52w":          calc_52w_high,
+    "connors_rsi":      calc_connors_rsi,
 }
 
 # ─── 详情接口 ─────────────────────────────────────────────────────────────────
@@ -1006,10 +1130,14 @@ def api_run():
         try:
             import pandas as pd
             meta = build_universe(body.get("universe","nasdaq100"), body.get("sector_filter",""))
-            start_str, end_str = resolve_dates(body.get("start"), body.get("end"), int(body.get("months",6)))
+            strategy = body.get("strategy", "momentum")
+            months = int(body.get("months",6))
+            # 短线/技术策略需要至少 12 个月计算 200日均线、52周高低点
+            if strategy in ("high52w", "connors_rsi") and months < 12:
+                months = 12
+            start_str, end_str = resolve_dates(body.get("start"), body.get("end"), months)
             log(f"区间：{start_str} → {end_str}", 12)
             prices = load_prices(meta["Ticker"].tolist(), start_str, end_str)
-            strategy = body.get("strategy", "momentum")
             fn = STRATEGIES.get(strategy, calc_momentum)
             df = fn(prices, meta, start_str, end_str)
             rows = df.head(100).to_dict(orient="records")
