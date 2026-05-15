@@ -330,6 +330,35 @@ tr.selected td:first-child{border-left:2px solid var(--accent);padding-left:10px
   align-items:center;justify-content:center;border-radius:var(--radius)}
 .ld-wrap.show{display:flex}
 
+.liq-low{background:rgba(220,38,38,.12);color:#b91c1c;font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;border:1px solid rgba(220,38,38,.3)}
+.liq-ok{font-size:11px;color:var(--text2);font-variant-numeric:tabular-nums}
+.balance-switch{display:flex;align-items:center;gap:6px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:4px 10px;height:32px;cursor:pointer;font-size:12px;font-weight:600;color:var(--text2)}
+.balance-switch:hover{border-color:var(--accent);color:var(--accent)}
+.balance-switch.on{background:rgba(37,99,235,.08);border-color:var(--accent);color:var(--accent)}
+.balance-switch .sw{width:24px;height:13px;border-radius:7px;background:var(--border);position:relative;transition:.15s}
+.balance-switch .sw::after{content:'';position:absolute;top:1px;left:1px;width:11px;height:11px;border-radius:50%;background:#fff;transition:.15s}
+.balance-switch.on .sw{background:var(--accent)}
+.balance-switch.on .sw::after{left:12px}
+.bt-btn{height:32px;padding:0 12px;border-radius:6px;border:1px solid var(--accent);background:#fff;color:var(--accent);font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:5px}
+.bt-btn:hover{background:rgba(37,99,235,.06)}
+.bt-btn:disabled{opacity:.45;cursor:not-allowed}
+.modal-mask{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:50;display:none;align-items:center;justify-content:center}
+.modal-mask.show{display:flex}
+.modal{background:var(--surface);border-radius:10px;width:min(880px,92vw);max-height:88vh;overflow:auto;box-shadow:0 12px 40px rgba(0,0,0,.3)}
+.modal-head{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
+.modal-head h3{font-size:15px;font-weight:800;margin:0}
+.modal-body{padding:16px 18px;display:flex;flex-direction:column;gap:14px}
+.bt-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.bt-stat{background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:9px 11px}
+.bt-stat-lbl{font-size:10px;color:var(--text3);font-weight:700;text-transform:uppercase;letter-spacing:.04em;margin-bottom:3px}
+.bt-stat-val{font-size:18px;font-weight:800;font-variant-numeric:tabular-nums}
+.bt-stat-val.g{color:var(--green)}.bt-stat-val.r{color:var(--red)}.bt-stat-val.a{color:var(--amber)}
+.bt-chart{background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:10px;height:280px;position:relative}
+.bt-hist{max-height:200px;overflow-y:auto;font-size:11px}
+.bt-hist table{width:100%;border-collapse:collapse}
+.bt-hist th,.bt-hist td{padding:4px 8px;border-bottom:1px solid var(--border);text-align:left}
+.bt-hist th{font-size:10px;color:var(--text3);font-weight:700;text-transform:uppercase;background:var(--surface)}
+@media(max-width:680px){.bt-stats{grid-template-columns:repeat(2,1fr)}}
 .diag-panel{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px 16px;margin:8px 16px 0;display:flex;flex-direction:column;gap:10px;flex-shrink:0}
 .diag-header{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border);padding-bottom:8px}
 .diag-title{font-size:12px;font-weight:800;color:var(--text);text-transform:uppercase;letter-spacing:.04em}
@@ -468,6 +497,13 @@ tr.selected td:first-child{border-left:2px solid var(--accent);padding-left:10px
         <input type="month" id="end_ym">
       </div>
     </div>
+    <div class="fsep"></div>
+    <div class="balance-switch" id="balanceSwitch" onclick="toggleBalance()" title="开启后前10每板块最多2只，自动跳过超额">
+      <div class="sw"></div>板块均衡
+    </div>
+    <button class="bt-btn" id="btnBacktest" onclick="runBacktest()" title="按当前策略走前向回测过去24个月">
+      📉 回测
+    </button>
   </div>
 
   <!-- strategy description -->
@@ -574,42 +610,42 @@ const STRAT_META = {
   momentum: {
     desc: "月度收益率算术均值，捕捉持续上涨趋势；适合趋势明确的牛市行情",
     sortKey: "mom_mean", sortAsc: false,
-    cols: ["rank","ticker","sector","price","mom_mean","total_ret","sharpe","max_dd","short_float","inst_hold","target","stop","risk_reward","horizon","earnings_date"],
+    cols: ["rank","ticker","sector","price","mom_mean","total_ret","sharpe","max_dd","short_float","inst_hold","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
   },
   momentum_quality: {
     desc: "动量(50%) + ROE(30%) + 净利润率(20%) 综合打分，过滤基本面差的动量股",
     sortKey: "composite", sortAsc: false,
-    cols: ["rank","ticker","sector","price","composite","mom_mean","roe","profit_margin","max_dd","short_float","inst_hold","target","stop","risk_reward","horizon","earnings_date"],
+    cols: ["rank","ticker","sector","price","composite","mom_mean","roe","profit_margin","max_dd","short_float","inst_hold","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
   },
   low_vol: {
     desc: "以 Beta 和年化波动率升序排列，优先低风险品种；适合震荡市或防御配置",
     sortKey: "beta", sortAsc: true,
-    cols: ["rank","ticker","sector","price","beta","ann_vol","total_ret","mom_mean","max_dd","target","stop","risk_reward","horizon","earnings_date"],
+    cols: ["rank","ticker","sector","price","beta","ann_vol","total_ret","mom_mean","max_dd","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
   },
   piotroski: {
     desc: "Piotroski F-Score：9项财务健康指标（盈利/杠杆/效率各3项），满分9分",
     sortKey: "fscore", sortAsc: false,
-    cols: ["rank","ticker","sector","price","fscore","f_profit","f_leverage","f_efficiency","roa","gross_margin","target","stop","risk_reward","horizon","earnings_date"],
+    cols: ["rank","ticker","sector","price","fscore","f_profit","f_leverage","f_efficiency","roa","gross_margin","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
   },
   dual_momentum: {
     desc: "两层过滤：① 绝对动量 — 总收益 > 3M国债收益率，不过线的排到末尾；② 剩余按相对动量排序",
     sortKey: "mom_mean", sortAsc: false,
-    cols: ["rank","ticker","sector","price","abs_pass","mom_mean","rf_hurdle","total_ret","sharpe","max_dd","target","stop","risk_reward","horizon","earnings_date"],
+    cols: ["rank","ticker","sector","price","abs_pass","mom_mean","rf_hurdle","total_ret","sharpe","max_dd","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
   },
   multifactor: {
     desc: "多因子 Z-Score 合成：动量35% + ROE25% + 净利润率15% + 低Beta15% + 低PS10%",
     sortKey: "mf_score", sortAsc: false,
-    cols: ["rank","ticker","sector","price","mf_score","mom_mean","roe","profit_margin","beta","ps","short_float","inst_hold","target","stop","risk_reward","horizon","earnings_date"],
+    cols: ["rank","ticker","sector","price","mf_score","mom_mean","roe","profit_margin","beta","ps","short_float","inst_hold","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
   },
   high52w: {
     desc: "George & Hwang 2004（JoF）：距52周高点越近的股票未来半年至一年持续走强；双重过滤=200日均线之上+正向月动量",
     sortKey: "dist_high", sortAsc: false,
-    cols: ["rank","ticker","sector","price","dist_high","passed","high_52w","from_low","above_ma200","mom_mean","target","stop","risk_reward","horizon","earnings_date"],
+    cols: ["rank","ticker","sector","price","dist_high","passed","high_52w","from_low","above_ma200","mom_mean","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
   },
   connors_rsi: {
     desc: "Larry Connors 短线 mean reversion：200日均线之上+RSI(2)<5 极度超卖→反弹至5日均线之上卖出；持有 2-5 天",
     sortKey: "rsi2", sortAsc: true,
-    cols: ["rank","ticker","sector","price","signal","rsi2","rsi14","from_ma200","ma5","above_ma200","target","stop","risk_reward","horizon","earnings_date"],
+    cols: ["rank","ticker","sector","price","signal","rsi2","rsi14","from_ma200","ma5","above_ma200","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
   },
 };
 
@@ -716,6 +752,12 @@ const COL_DEF = {
     const danger = d<14 ? 'neg' : d<30 ? 'a' : 'neu';
     const wt = d<14 ? '700' : '500';
     return `<div class="tgt-cell"><span class="v ${danger}" style="font-weight:${wt}">${v}</span><span class="pct ${danger}">${d>=0?d:0} 天后</span></div>`;
+  }},
+  atr:           { label:'ATR',          fmt:(v)=>v!=null?`<span class="num neu">$${v}</span>`:'—' },
+  dollar_vol_20d:{ label:'日均成交$M',   fmt:(v,r)=>{
+    if(v==null) return '—';
+    if(r.low_liq) return `<span class="liq-low">$${v}M ⚠ 低流动</span>`;
+    return `<span class="liq-ok">$${v}M</span>`;
   }},
 };
 
@@ -1117,6 +1159,152 @@ function onUniverseChange(){ loadSectors(document.getElementById('universe').val
 loadSectors('nasdaq100');
 
 // ── SSE ───────────────────────────────────────────────────────────────────────
+// ── backtest ─────────────────────────────────────────────────────────────────
+let _btSse = null;
+async function runBacktest() {
+  const btn = document.getElementById('btnBacktest');
+  btn.disabled = true;
+  document.getElementById('btModal').classList.add('show');
+  document.getElementById('btTitle').textContent = `策略回测 · ${STRAT_META[strategy]?.desc?.slice(0,30) || strategy}`;
+  document.getElementById('btBody').innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:center;gap:8px;height:200px;color:var(--text3)">
+      <div class="spinner"></div>
+      <div>正在回测过去24个月，每月初按当前策略选前10只，等权持有1个月…</div>
+    </div>`;
+
+  try {
+    const body = {
+      strategy,
+      universe: document.getElementById('universe').value,
+      sector_filter: document.getElementById('sector_filter').value,
+      lookback_months: 24,
+      hold_n: 10,
+    };
+    const r = await fetch('/api/backtest', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)
+    });
+    const d = await r.json();
+    if (d.error) {
+      document.getElementById('btBody').innerHTML = `<div style="color:var(--red);padding:20px">${esc(d.error)}</div>`;
+      btn.disabled = false;
+      return;
+    }
+    // 等 SSE 推送 backtest_done；超时兜底
+  } catch (e) {
+    document.getElementById('btBody').innerHTML = `<div style="color:var(--red);padding:20px">${esc(e.message)}</div>`;
+    btn.disabled = false;
+  }
+}
+
+function closeBacktest() {
+  document.getElementById('btModal').classList.remove('show');
+  document.getElementById('btnBacktest').disabled = false;
+}
+
+function renderBacktest(d) {
+  document.getElementById('btnBacktest').disabled = false;
+  const s = d.stats;
+  const alphaC = s.alpha >= 0 ? 'g' : 'r';
+  const cumC   = s.cum_ret >= 0 ? 'g' : 'r';
+  const ddC    = 'r';
+  const wrC    = s.win_rate >= 55 ? 'g' : s.win_rate >= 45 ? 'a' : 'r';
+  const shC    = s.sharpe >= 1 ? 'g' : s.sharpe >= 0.5 ? 'a' : 'r';
+
+  let histRows = '';
+  d.history.forEach(h => {
+    const c = h.ret > 0 ? 'pos' : 'neg';
+    histRows += `<tr>
+      <td style="font-variant-numeric:tabular-nums;color:var(--text2)">${esc(h.date)}</td>
+      <td>${h.tickers.slice(0,8).map(esc).join(' · ')}${h.tickers.length>8?` <span style="color:var(--text3)">+${h.tickers.length-8}</span>`:''}</td>
+      <td class="num ${c}" style="text-align:right;font-weight:700">${h.ret>0?'+':''}${h.ret}%</td>
+    </tr>`;
+  });
+
+  document.getElementById('btBody').innerHTML = `
+    <div class="bt-stats">
+      <div class="bt-stat"><div class="bt-stat-lbl">累计收益</div><div class="bt-stat-val ${cumC}">${s.cum_ret>0?'+':''}${s.cum_ret}%</div></div>
+      <div class="bt-stat"><div class="bt-stat-lbl">SPY 基准</div><div class="bt-stat-val">${s.bench_ret>0?'+':''}${s.bench_ret}%</div></div>
+      <div class="bt-stat"><div class="bt-stat-lbl">超额 α</div><div class="bt-stat-val ${alphaC}">${s.alpha>0?'+':''}${s.alpha}%</div></div>
+      <div class="bt-stat"><div class="bt-stat-lbl">年化 CAGR</div><div class="bt-stat-val ${cumC}">${s.cagr>0?'+':''}${s.cagr}%</div></div>
+      <div class="bt-stat"><div class="bt-stat-lbl">最大回撤</div><div class="bt-stat-val ${ddC}">${s.max_dd}%</div></div>
+      <div class="bt-stat"><div class="bt-stat-lbl">胜率（月度持仓）</div><div class="bt-stat-val ${wrC}">${s.win_rate}%</div></div>
+      <div class="bt-stat"><div class="bt-stat-lbl">Sharpe（年化）</div><div class="bt-stat-val ${shC}">${s.sharpe}</div></div>
+      <div class="bt-stat"><div class="bt-stat-lbl">总交易次数</div><div class="bt-stat-val">${s.trades}</div></div>
+    </div>
+    <div class="bt-chart"><canvas id="btCanvas"></canvas></div>
+    <div>
+      <div class="sec-head">最近持仓记录</div>
+      <div class="bt-hist">
+        <table>
+          <thead><tr><th style="width:90px">月份</th><th>前10名</th><th style="text-align:right;width:80px">月度收益</th></tr></thead>
+          <tbody>${histRows||'<tr><td colspan="3" style="color:var(--text3);text-align:center;padding:12px">无记录</td></tr>'}</tbody>
+        </table>
+      </div>
+    </div>
+    <div style="font-size:11px;color:var(--text3);padding:8px 0;border-top:1px solid var(--border);line-height:1.6">
+      回测说明：每个月底用前6个月数据跑策略 → 选前 ${d.hold_n} 等权持有1个月 → 月底换仓。SPY 为基准，未扣交易成本与税。回测窗口 ${d.lookback} 个月。
+    </div>`;
+
+  drawBtChart('btCanvas', d.dates, d.equity, d.bench);
+}
+
+function drawBtChart(id, dates, equity, bench) {
+  const c = document.getElementById(id);
+  if (!c) return;
+  const dpr = devicePixelRatio || 1;
+  const W = c.parentElement.clientWidth - 20, H = 260;
+  c.width = W*dpr; c.height = H*dpr;
+  c.style.width = W+'px'; c.style.height = H+'px';
+  const ctx = c.getContext('2d'); ctx.scale(dpr, dpr);
+
+  const allVals = [...equity, ...bench];
+  const mn = Math.min(...allVals), mx = Math.max(...allVals);
+  const rng = mx-mn || 1;
+  const pL=42, pR=10, pT=12, pB=24, cW=W-pL-pR, cH=H-pT-pB;
+  const xf = i => pL + i/(dates.length-1||1)*cW;
+  const yf = v => pT + (1-(v-mn)/rng)*cH;
+
+  // grid
+  ctx.strokeStyle='#e9ebee'; ctx.lineWidth=.5;
+  for(let i=0;i<=4;i++){
+    const y=pT+i/4*cH;
+    ctx.beginPath(); ctx.moveTo(pL,y); ctx.lineTo(pL+cW,y); ctx.stroke();
+    const val = mx-(mx-mn)*i/4;
+    ctx.fillStyle='#9ca3af'; ctx.font='10px system-ui'; ctx.textAlign='right';
+    ctx.fillText((val*100).toFixed(0), pL-4, y+3);
+  }
+  // 100%基线
+  const yBase = yf(1);
+  ctx.strokeStyle='rgba(156,163,175,.5)'; ctx.setLineDash([3,3]);
+  ctx.beginPath(); ctx.moveTo(pL,yBase); ctx.lineTo(pL+cW,yBase); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // bench line（灰）
+  ctx.beginPath();
+  bench.forEach((v,i)=>i===0?ctx.moveTo(xf(i),yf(v)):ctx.lineTo(xf(i),yf(v)));
+  ctx.strokeStyle='#9ca3af'; ctx.lineWidth=1.5; ctx.stroke();
+
+  // equity line（accent）
+  ctx.beginPath();
+  equity.forEach((v,i)=>i===0?ctx.moveTo(xf(i),yf(v)):ctx.lineTo(xf(i),yf(v)));
+  ctx.strokeStyle='#2563eb'; ctx.lineWidth=2.5; ctx.stroke();
+
+  // legend
+  ctx.font='11px system-ui'; ctx.textAlign='left';
+  ctx.fillStyle='#2563eb'; ctx.fillRect(pL+4, pT+4, 12, 2);
+  ctx.fillStyle='var(--text)'; ctx.fillStyle='#111827';
+  ctx.fillText('策略', pL+20, pT+8);
+  ctx.fillStyle='#9ca3af'; ctx.fillRect(pL+60, pT+4, 12, 2);
+  ctx.fillStyle='#111827';
+  ctx.fillText('SPY', pL+76, pT+8);
+
+  // date axis: start, mid, end
+  ctx.fillStyle='#9ca3af'; ctx.font='9px system-ui'; ctx.textAlign='center';
+  [0, Math.floor(dates.length/2), dates.length-1].forEach(i=>{
+    ctx.fillText(dates[i].slice(0,7), xf(i), H-6);
+  });
+}
+
 // ── top-10 diagnostics ────────────────────────────────────────────────────────
 let _diagCollapsed = false;
 function corrColor(v) {
@@ -1217,6 +1405,9 @@ function connectSSE() {
   evtSource.addEventListener('log', e=>{
     const d=JSON.parse(e.data); setStatus('running',d.msg); if(d.pct>=0) setProgress(d.pct);
   });
+  evtSource.addEventListener('backtest_done', e=>{
+    try { renderBacktest(JSON.parse(e.data)); } catch(_) {}
+  });
   evtSource.addEventListener('done', e=>{
     try {
       const d=JSON.parse(e.data);
@@ -1255,6 +1446,12 @@ function connectSSE() {
 connectSSE();
 
 // ── run ───────────────────────────────────────────────────────────────────────
+let balanceSectorsOn = false;
+function toggleBalance() {
+  balanceSectorsOn = !balanceSectorsOn;
+  document.getElementById('balanceSwitch').classList.toggle('on', balanceSectorsOn);
+}
+
 async function runCalc() {
   const btn=document.getElementById('runBtn');
   btn.disabled=true; setStatus('running','启动中…'); setProgress(2);
@@ -1265,6 +1462,8 @@ async function runCalc() {
     months:        isCustom?6:activePreset,
     start:         isCustom?(document.getElementById('start_ym').value||null):null,
     end:           isCustom?(document.getElementById('end_ym').value||null):null,
+    balance_sectors: balanceSectorsOn,
+    max_per_sector:  2,
   };
   try{
     const d=await (await fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
@@ -1741,5 +1940,20 @@ async function loadSectorHeatmap(force = false) {
 }
 
 </script>
+<!-- backtest modal -->
+<div class="modal-mask" id="btModal" onclick="if(event.target===this)closeBacktest()">
+  <div class="modal">
+    <div class="modal-head">
+      <h3 id="btTitle">策略回测</h3>
+      <button class="close-btn" onclick="closeBacktest()">✕</button>
+    </div>
+    <div class="modal-body" id="btBody">
+      <div style="display:flex;align-items:center;justify-content:center;gap:8px;height:200px;color:var(--text3)">
+        <div class="spinner"></div>正在回测，请稍候…
+      </div>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>

@@ -1187,6 +1187,47 @@ def _atr(prices, ticker, n=14):
     if pd.isna(atr) or atr <= 0: return None
     return float(atr)
 
+# ─── 真 ATR（带 H/L/C 完整 True Range）─────────────────────────────────────
+# 用 yfinance.history() 单只补拉，仅前10名用 — 不影响整体计算时间
+
+def _atr_true(ticker, n=14, dollar_vol=False):
+    """返回 (atr_true, avg_dollar_vol_20d) 或 (None, None)
+    True Range = max(H-L, |H-Cprev|, |Cprev-L|)
+    """
+    import pandas as pd, numpy as np
+    try:
+        import yfinance as yf
+        result = [None]
+        def _do():
+            try:
+                # 60天足够算 14日 ATR + 20日成交额
+                result[0] = yf.Ticker(ticker).history(period="60d", auto_adjust=True)
+            except: pass
+        import threading as _th
+        th = _th.Thread(target=_do, daemon=True)
+        th.start(); th.join(timeout=6)
+        df = result[0]
+        if df is None or df.empty or len(df) < n+1:
+            return None, None
+        high  = df["High"]
+        low   = df["Low"]
+        close = df["Close"]
+        prev_close = close.shift(1)
+        tr = pd.concat([(high-low).abs(),
+                        (high-prev_close).abs(),
+                        (low-prev_close).abs()], axis=1).max(axis=1)
+        atr = float(tr.rolling(n).mean().iloc[-1])
+        if pd.isna(atr) or atr <= 0:
+            return None, None
+        # 20日平均美元成交额
+        adv = None
+        if dollar_vol and "Volume" in df.columns and len(df) >= 20:
+            dv = (close * df["Volume"]).tail(20)
+            adv = float(dv.mean())
+        return atr, adv
+    except:
+        return None, None
+
 # ─── 财报日期（事件风险）─────────────────────────────────────────────────────
 
 _earnings_cache: dict = {}     # ticker -> (ts, date_str|None)
@@ -1243,45 +1284,82 @@ def _parallel_earnings(tickers, pct_start, pct_end, workers=10):
             except: pass
     return results
 
-def _add_targets(df, prices, strategy):
-    """给前10名计算目标价 / 止损 / 风险回报比 / 财报日期"""
+def _balance_by_sector(df, max_per_sector=2, top_n=10):
+    """从排序后的 df 中挑 top_n 只，每个板块最多 max_per_sector 只
+    依然按原排序优先级挑选，跳过超额板块的股票
+    """
+    import pandas as pd
+    if df.empty: return df.head(0), []
+    picked_idx = []
+    sector_count = {}
+    skipped = []   # 被跳过的股票（ticker, sector, reason）
+    for i in df.index:
+        sec = df.at[i, "sector"]
+        sec_key = str(sec) if sec is not None and not pd.isna(sec) else "未知"
+        cnt = sector_count.get(sec_key, 0)
+        if cnt >= max_per_sector:
+            skipped.append({
+                "ticker": df.at[i, "ticker"],
+                "sector": sec_key,
+                "orig_rank": int(df.at[i, "rank"]) if "rank" in df.columns else None,
+            })
+            continue
+        picked_idx.append(i)
+        sector_count[sec_key] = cnt + 1
+        if len(picked_idx) >= top_n:
+            break
+    balanced = df.loc[picked_idx].copy()
+    return balanced, skipped
+
+def _add_targets(df, prices, strategy, balance_sectors=False, max_per_sector=2):
+    """给前10名计算目标价 / 止损 / 风险回报比 / 财报日期 / 流动性
+    使用 True Range ATR（带 H/L/C 数据），并标记低流动性股票
+    """
     import pandas as pd, numpy as np
-    if df.empty: return df
+    if df.empty: return df, None
     term, stop_mult, target_mult, horizon, basis = _TERM_MAP.get(
         strategy, ("mid", 2.0, 4.0, "1-3月", "2:1 R:R"))
 
     df["term"]    = term
     df["horizon"] = horizon
-    df["target"]      = None
-    df["stop"]        = None
-    df["risk_reward"] = None
-    df["upside_pct"]  = None
-    df["downside_pct"]= None
-    df["earnings_date"] = None
-    df["days_to_earnings"] = None
+    for col in ("target","stop","risk_reward","upside_pct","downside_pct",
+                "earnings_date","days_to_earnings","atr","dollar_vol_20d","low_liq"):
+        df[col] = None
 
-    top10_tickers = df.head(10)["ticker"].tolist()
+    # 板块均衡：从排行榜按规则筛 10 只
+    skipped = []
+    if balance_sectors:
+        balanced, skipped = _balance_by_sector(df, max_per_sector=max_per_sector, top_n=10)
+        top10_idx = list(balanced.index)
+    else:
+        top10_idx = list(df.head(10).index)
+    top10_tickers = df.loc[top10_idx, "ticker"].tolist()
+
     # 并行拉前10名财报日期
     earnings_map = _parallel_earnings(top10_tickers, 96, 99, workers=10)
 
     today_dt = pd.Timestamp.today().normalize()
-    for i in df.head(10).index:
+    for i in top10_idx:
         ticker = df.at[i, "ticker"]
-        if ticker not in prices.columns: continue
         entry = df.at[i, "price"]
         if entry is None or pd.isna(entry): continue
-        atr = _atr(prices, ticker, 14)
-        if atr is None: continue
 
-        stop_price   = entry - stop_mult   * atr
-        target_price = entry + target_mult * atr
+        # 真 ATR + 流动性（H/L/C + Volume）
+        atr_t, adv = _atr_true(ticker, n=14, dollar_vol=True)
+        # fallback：拉不到 H/L 时用 close 近似
+        if atr_t is None and ticker in prices.columns:
+            atr_t = _atr(prices, ticker, 14)
+        if atr_t is None: continue
 
-        # Connors 短线：目标改用 MA20（mean reversion 经典）
-        if strategy == "connors_rsi":
+        stop_price   = entry - stop_mult   * atr_t
+        target_price = entry + target_mult * atr_t
+
+        # Connors 短线：目标用 MA20（mean reversion）
+        if strategy == "connors_rsi" and ticker in prices.columns:
             s = prices[ticker].dropna()
             if len(s) >= 20:
                 ma20 = float(s.tail(20).mean())
-                target_price = max(target_price, ma20)  # 取两者较高，确保反弹空间
+                target_price = max(target_price, ma20)
 
         upside   = (target_price/entry - 1) * 100
         downside = (1 - stop_price/entry)   * 100
@@ -1292,8 +1370,14 @@ def _add_targets(df, prices, strategy):
         df.at[i, "upside_pct"]   = round(float(upside),       2)
         df.at[i, "downside_pct"] = round(float(downside),     2)
         df.at[i, "risk_reward"]  = round(float(rr),           2)
+        df.at[i, "atr"]          = round(float(atr_t),        2)
 
-        # 财报日期 + 距今天数
+        # 流动性：日均美元成交额；< $5M 视为低流动性
+        if adv is not None:
+            df.at[i, "dollar_vol_20d"] = round(float(adv) / 1e6, 1)  # 单位：百万美元
+            df.at[i, "low_liq"]        = bool(adv < 5e6)
+
+        # 财报日
         ed = earnings_map.get(ticker)
         if ed:
             try:
@@ -1302,7 +1386,15 @@ def _add_targets(df, prices, strategy):
                 df.at[i, "earnings_date"]    = ed
                 df.at[i, "days_to_earnings"] = days
             except: pass
-    return df
+
+    # 如果做了板块均衡：把均衡后的10只搬到表头，原排名仍保留在 orig_rank
+    if balance_sectors:
+        df["orig_rank"] = df["rank"]
+        balanced_rows = df.loc[top10_idx].copy()
+        rest = df.drop(top10_idx)
+        df = pd.concat([balanced_rows, rest], ignore_index=False).reset_index(drop=True)
+        df["rank"] = range(1, len(df) + 1)
+    return df, skipped if balance_sectors else None
 
 # ─── 前10诊断：相关性 + 板块占比 ──────────────────────────────────────────────
 
@@ -1411,11 +1503,16 @@ def api_run():
             prices = load_prices(meta["Ticker"].tolist(), start_str, end_str)
             fn = STRATEGIES.get(strategy, calc_momentum)
             df = fn(prices, meta, start_str, end_str)
-            df = _add_targets(df, prices, strategy)
+            balance_sectors = bool(body.get("balance_sectors", False))
+            max_per_sector  = int(body.get("max_per_sector", 2))
+            df, skipped = _add_targets(df, prices, strategy,
+                                       balance_sectors=balance_sectors,
+                                       max_per_sector=max_per_sector)
             diagnostics = _diagnose_top10(df, prices)
             rows = df.head(100).to_dict(orient="records")
             _broadcast("done", {"rows": rows, "start": start_str, "end": end_str,
-                                "strategy": strategy, "diagnostics": diagnostics})
+                                "strategy": strategy, "diagnostics": diagnostics,
+                                "skipped": skipped, "balance_sectors": balance_sectors})
         except Exception as e:
             _broadcast("error", {"msg": str(e)})
 
@@ -1425,6 +1522,185 @@ def api_run():
     def run_release():
         try: worker()
         finally: _calc_lock.release()
+
+    threading.Thread(target=run_release, daemon=True).start()
+    return jsonify({"ok": True})
+
+# ─── 简版回测（walk-forward）────────────────────────────────────────────────
+# 每月初按当前策略选前 N 只，等权持有一个月，到月底再换；与基准（SPY）对比
+# 缓存因为重算成本高（拉历史 + 反复算策略）
+
+_backtest_cache: dict = {}   # key -> (ts, result)
+_BACKTEST_TTL = 6 * 3600
+
+def _run_backtest(strategy_key, universe, sector_filter, lookback_months, hold_n=10):
+    """走前向回测 — 每月初按策略选前 N 只持有一个月"""
+    import pandas as pd, numpy as np, yfinance as yf
+    log(f"回测准备：{strategy_key} · 回看 {lookback_months} 月", 5)
+
+    # 1. 建股票池
+    meta = build_universe(universe, sector_filter)
+
+    # 2. 一次性拉所有价格（多拉6个月作信号窗口）
+    end = pd.Timestamp.today()
+    start = end - pd.DateOffset(months=lookback_months + 6)
+    start_str, end_str = start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+    log("下载历史价格…", 12)
+    prices_full = load_prices(meta["Ticker"].tolist(), start_str, end_str)
+
+    # 3. 基准 SPY
+    log("下载 SPY 基准…", 35)
+    spy = yf.download("SPY", start=start_str, end=end_str, auto_adjust=True, progress=False)["Close"].dropna()
+    if hasattr(spy, "ndim") and spy.ndim == 2: spy = spy.iloc[:, 0]
+
+    # 4. 找月初日期序列（每个月第一个交易日），取最近 lookback_months 个
+    monthly = prices_full.resample("ME").last()
+    month_ends = monthly.index[-(lookback_months+1):]   # 多取1个作起点
+
+    # 5. 每个月底用前6个月数据跑策略 → 选前N → 持有到下月底
+    fn = STRATEGIES.get(strategy_key, calc_momentum)
+    equity = [1.0]              # 策略净值（起点1）
+    bench  = [1.0]              # SPY 净值
+    dates  = [str(month_ends[0].date())]
+    wins, losses = 0, 0
+    trade_returns = []
+    selected_log = []           # 每月持仓记录
+
+    for i in range(len(month_ends) - 1):
+        sig_end   = month_ends[i]
+        hold_end  = month_ends[i+1]
+        # 信号窗口：sig_end 往前 6 个月
+        sig_start = sig_end - pd.DateOffset(months=6)
+        pct_progress = 40 + int((i / max(1, len(month_ends)-2)) * 55)
+        log(f"回测 {sig_end.strftime('%Y-%m')}…", pct_progress)
+
+        # 切信号窗口数据
+        prices_sig = prices_full.loc[(prices_full.index >= sig_start) & (prices_full.index <= sig_end)]
+        prices_sig = prices_sig.dropna(axis=1, how="all")
+        if prices_sig.empty or len(prices_sig) < 30:
+            equity.append(equity[-1])
+            bench.append(bench[-1])
+            dates.append(str(hold_end.date()))
+            continue
+
+        # 跑策略
+        try:
+            df_rank = fn(prices_sig, meta, sig_start.strftime("%Y-%m-%d"), sig_end.strftime("%Y-%m-%d"))
+        except Exception:
+            df_rank = None
+        if df_rank is None or df_rank.empty:
+            equity.append(equity[-1])
+            bench.append(bench[-1])
+            dates.append(str(hold_end.date()))
+            continue
+
+        top = df_rank.head(hold_n)["ticker"].tolist()
+        # 持有期收益：sig_end → hold_end，等权
+        port_ret = 0.0
+        cnt = 0
+        for t in top:
+            if t not in prices_full.columns: continue
+            s = prices_full[t]
+            p0 = s.asof(sig_end)
+            p1 = s.asof(hold_end)
+            if pd.isna(p0) or pd.isna(p1) or p0 <= 0: continue
+            r = float(p1/p0 - 1)
+            port_ret += r
+            cnt += 1
+            trade_returns.append(r)
+            if r > 0: wins += 1
+            else:    losses += 1
+        if cnt > 0: port_ret /= cnt
+
+        # SPY 期间收益
+        try:
+            sp0 = float(spy.asof(sig_end))
+            sp1 = float(spy.asof(hold_end))
+            spy_ret = sp1/sp0 - 1 if sp0 > 0 else 0
+        except: spy_ret = 0
+
+        equity.append(equity[-1] * (1 + port_ret))
+        bench.append(bench[-1]  * (1 + spy_ret))
+        dates.append(str(hold_end.date()))
+        selected_log.append({"date": str(sig_end.date()), "tickers": top, "ret": round(port_ret*100, 2)})
+
+    # 6. 汇总统计
+    arr_eq   = np.array(equity)
+    cum_ret  = (arr_eq[-1] - 1) * 100
+    cum_bench = (bench[-1] - 1) * 100
+    # 年化
+    n_months = len(equity) - 1
+    n_years = n_months / 12 if n_months > 0 else 1
+    cagr = ((arr_eq[-1])**(1/n_years) - 1) * 100 if n_years > 0 else 0
+    # 最大回撤
+    peak = np.maximum.accumulate(arr_eq)
+    dd = (arr_eq - peak) / peak
+    max_dd = float(dd.min()) * 100
+    # 胜率
+    total_trades = wins + losses
+    win_rate = wins / total_trades * 100 if total_trades else 0
+    # Sharpe（月度，年化）
+    monthly_rets = np.diff(arr_eq) / arr_eq[:-1]
+    if len(monthly_rets) > 1 and monthly_rets.std() > 1e-9:
+        sharpe = (monthly_rets.mean() / monthly_rets.std()) * np.sqrt(12)
+    else:
+        sharpe = 0
+    # 超额
+    alpha = cum_ret - cum_bench
+
+    log("回测完成", 100)
+    return {
+        "strategy":   strategy_key,
+        "lookback":   lookback_months,
+        "hold_n":     hold_n,
+        "dates":      dates,
+        "equity":     [round(float(v), 4) for v in arr_eq],
+        "bench":      [round(float(v), 4) for v in bench],
+        "stats": {
+            "cum_ret":    round(float(cum_ret),   2),
+            "bench_ret":  round(float(cum_bench), 2),
+            "alpha":      round(float(alpha),     2),
+            "cagr":       round(float(cagr),      2),
+            "max_dd":     round(float(max_dd),    2),
+            "win_rate":   round(float(win_rate),  1),
+            "sharpe":     round(float(sharpe),    2),
+            "trades":     int(total_trades),
+            "wins":       int(wins),
+            "losses":     int(losses),
+        },
+        "history":    selected_log[-12:],   # 最近12个月持仓
+    }
+
+_backtest_lock = threading.Lock()
+
+@app.route("/api/backtest", methods=["POST"])
+def api_backtest():
+    body = request.json or {}
+    strategy = body.get("strategy", "momentum")
+    universe = body.get("universe", "nasdaq100")
+    sector_filter = body.get("sector_filter", "")
+    lookback = int(body.get("lookback_months", 24))
+    hold_n   = int(body.get("hold_n", 10))
+    cache_key = f"{strategy}|{universe}|{sector_filter}|{lookback}|{hold_n}"
+    import time as _t
+    entry = _backtest_cache.get(cache_key)
+    if entry and _t.time() - entry[0] < _BACKTEST_TTL:
+        return jsonify(entry[1])
+
+    def worker():
+        try:
+            result = _run_backtest(strategy, universe, sector_filter, lookback, hold_n)
+            _backtest_cache[cache_key] = (_t.time(), result)
+            _broadcast("backtest_done", result)
+        except Exception as e:
+            _broadcast("error", {"msg": "回测失败：" + str(e)})
+
+    if not _backtest_lock.acquire(blocking=False):
+        return jsonify({"error": "已有回测运行中，请稍候"}), 429
+
+    def run_release():
+        try: worker()
+        finally: _backtest_lock.release()
 
     threading.Thread(target=run_release, daemon=True).start()
     return jsonify({"ok": True})
