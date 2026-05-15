@@ -330,6 +330,48 @@ tr.selected td:first-child{border-left:2px solid var(--accent);padding-left:10px
   align-items:center;justify-content:center;border-radius:var(--radius)}
 .ld-wrap.show{display:flex}
 
+.consensus-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px}
+.cs-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px 14px;display:flex;flex-direction:column;gap:8px;border-left:4px solid var(--border)}
+.cs-card.tier-1{border-left-color:#16a34a;background:linear-gradient(135deg,rgba(22,163,74,.04),transparent)}
+.cs-card.tier-2{border-left-color:#d97706}
+.cs-card.tier-3{border-left-color:#9ca3af}
+.cs-head{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
+.cs-tk{font-size:18px;font-weight:800;cursor:pointer;color:var(--accent)}
+.cs-tk:hover{text-decoration:underline}
+.cs-name{font-size:11px;color:var(--text3);margin-top:2px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cs-badge{background:rgba(22,163,74,.12);color:#15803d;font-size:18px;font-weight:900;padding:4px 12px;border-radius:6px;line-height:1;flex-shrink:0}
+.cs-card.tier-2 .cs-badge{background:rgba(217,119,6,.12);color:#b45309}
+.cs-card.tier-3 .cs-badge{background:var(--surface2);color:var(--text2)}
+.cs-strats{display:flex;flex-wrap:wrap;gap:4px}
+.cs-strat-tag{font-size:10px;padding:2px 7px;border-radius:3px;background:var(--surface2);color:var(--text2);border:1px solid var(--border);font-weight:600}
+.cs-strat-tag b{color:var(--accent)}
+.cs-meta{display:flex;justify-content:space-between;font-size:11px;color:var(--text3)}
+/* watchlist */
+.wl-empty{text-align:center;padding:60px 20px;color:var(--text3)}
+.wl-add-form{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px;display:grid;grid-template-columns:repeat(5,1fr) auto;gap:8px;align-items:end;margin-bottom:12px}
+.wl-add-form label{font-size:10px;color:var(--text3);font-weight:700;text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px;display:block}
+.wl-add-form input{width:100%;border:1px solid var(--border);background:var(--surface2);padding:6px 9px;border-radius:5px;font-size:13px;font-variant-numeric:tabular-nums;outline:none;height:32px}
+.wl-add-form input:focus{border-color:var(--accent)}
+.wl-add-btn{height:32px;padding:0 14px;border-radius:5px;border:none;background:var(--accent);color:#fff;font-weight:700;cursor:pointer;font-size:13px}
+.wl-table{width:100%;border-collapse:collapse;font-size:13px;background:var(--surface);border:1px solid var(--border);border-radius:8px;overflow:hidden}
+.wl-table th{padding:9px 10px;text-align:left;border-bottom:1px solid var(--border);color:var(--text2);font-size:11px;font-weight:700;text-transform:uppercase;background:var(--surface2)}
+.wl-table td{padding:9px 10px;border-bottom:1px solid var(--border)}
+.wl-table tr:last-child td{border-bottom:none}
+.wl-pnl{font-weight:700;font-variant-numeric:tabular-nums}
+.wl-prog{position:relative;background:var(--surface2);height:6px;border-radius:3px;overflow:hidden;border:1px solid var(--border)}
+.wl-prog-stop{position:absolute;left:0;top:0;height:100%;background:var(--red);opacity:.6}
+.wl-prog-tgt {position:absolute;left:0;top:0;height:100%;background:var(--green);opacity:.6}
+.wl-prog-now {position:absolute;top:-2px;width:2px;height:10px;background:var(--accent)}
+.wl-del{background:none;border:none;color:var(--text3);cursor:pointer;font-size:15px;padding:2px 6px;border-radius:3px}
+.wl-del:hover{background:rgba(220,38,38,.1);color:var(--red)}
+/* position sizer */
+.sizer-box{background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:10px 12px;display:flex;flex-direction:column;gap:8px;margin-top:8px}
+.sizer-row{display:flex;gap:8px;align-items:center;font-size:11px;flex-wrap:wrap}
+.sizer-row input{width:80px;border:1px solid var(--border);background:var(--surface);padding:3px 7px;border-radius:4px;font-size:12px;font-variant-numeric:tabular-nums;outline:none;height:24px}
+.sizer-result{background:rgba(37,99,235,.06);border:1px solid rgba(37,99,235,.2);border-radius:5px;padding:8px 10px;display:flex;justify-content:space-between;align-items:baseline;font-size:12px}
+.sizer-result b{font-size:20px;color:var(--accent);font-variant-numeric:tabular-nums}
+/* analyst compare */
+.analyst-compare{background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:7px 10px;margin-top:8px;font-size:11px;display:flex;justify-content:space-between;align-items:center}
 .liq-low{background:rgba(220,38,38,.12);color:#b91c1c;font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;border:1px solid rgba(220,38,38,.3)}
 .liq-ok{font-size:11px;color:var(--text2);font-variant-numeric:tabular-nums}
 .balance-switch{display:flex;align-items:center;gap:6px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:4px 10px;height:32px;cursor:pointer;font-size:12px;font-weight:600;color:var(--text2)}
@@ -420,17 +462,24 @@ tr.selected td:first-child{border-left:2px solid var(--accent);padding-left:10px
   <!-- row 1 -->
   <div class="header-top">
     <div class="logo">美股<em>工具箱</em></div>
-    <button class="btn-run" id="runBtn" onclick="runCalc()" style="display:none">
-      <svg width="11" height="11" viewBox="0 0 11 11" fill="currentColor"><path d="M2 1l8 4.5-8 4.5V1z"/></svg>
-      开始计算
-    </button>
+    <div style="display:flex;align-items:center;gap:8px">
+      <button class="bt-btn" id="runConsensusBtn" onclick="runConsensus()" style="display:none">
+        ⭐ 跑叠加榜
+      </button>
+      <button class="btn-run" id="runBtn" onclick="runCalc()" style="display:none">
+        <svg width="11" height="11" viewBox="0 0 11 11" fill="currentColor"><path d="M2 1l8 4.5-8 4.5V1z"/></svg>
+        开始计算
+      </button>
+    </div>
   </div>
 
   <!-- view tabs -->
   <div class="view-bar">
     <button class="vtab active" id="vtab-dashboard" onclick="setView('dashboard')">🌡 市场温度</button>
     <button class="vtab" id="vtab-strategy" onclick="setView('strategy')">📊 策略排序</button>
+    <button class="vtab" id="vtab-consensus" onclick="setView('consensus')">⭐ 叠加榜</button>
     <button class="vtab" id="vtab-sectors" onclick="setView('sectors')">🔥 板块热力</button>
+    <button class="vtab" id="vtab-watchlist" onclick="setView('watchlist')">📌 自选 <span id="wlCount" style="background:var(--accent);color:#fff;padding:0 6px;border-radius:9px;font-size:10px;margin-left:4px;display:none">0</span></button>
   </div>
 
   <!-- strategy tabs (only in strategy view) -->
@@ -604,6 +653,16 @@ tr.selected td:first-child{border-left:2px solid var(--accent);padding-left:10px
   </div>
 </div>
 
+<!-- consensus view -->
+<div id="viewConsensus" style="display:none;flex:1;overflow:auto;flex-direction:column;padding:14px 16px;gap:10px">
+  <div id="consensusPanel"><div class="empty-state"><div class="icon">⭐</div><p>点击右上角「跑叠加榜」</p><small>同时跑 7 个策略（除 Piotroski），按入选次数排序，发现高确信度名单</small></div></div>
+</div>
+
+<!-- watchlist view -->
+<div id="viewWatchlist" style="display:none;flex:1;overflow:auto;flex-direction:column;padding:14px 16px;gap:10px">
+  <div id="watchlistPanel"></div>
+</div>
+
 <script>
 // ── config ────────────────────────────────────────────────────────────────────
 const STRAT_META = {
@@ -773,18 +832,24 @@ function fPips(v, total) {
 
 // ── view switching ────────────────────────────────────────────────────────────
 function setView(v) {
-  const isDash = v === 'dashboard', isSec = v === 'sectors', isStr = v === 'strategy';
+  const isDash = v==='dashboard', isSec = v==='sectors', isStr = v==='strategy', isCon = v==='consensus', isWL = v==='watchlist';
   document.getElementById('viewDashboard').style.display = isDash ? 'flex' : 'none';
   document.getElementById('viewStrategy').style.display  = isStr  ? 'flex' : 'none';
   document.getElementById('viewSectors').style.display   = isSec  ? 'flex' : 'none';
+  document.getElementById('viewConsensus').style.display = isCon  ? 'flex' : 'none';
+  document.getElementById('viewWatchlist').style.display = isWL   ? 'flex' : 'none';
   document.getElementById('strategyBar').style.display   = isStr  ? 'flex' : 'none';
   document.getElementById('runBtn').style.display        = isStr  ? 'flex' : 'none';
+  document.getElementById('runConsensusBtn').style.display = isCon ? 'flex' : 'none';
   document.querySelectorAll('.vtab').forEach(b => b.classList.toggle('active', b.id === 'vtab-' + v));
-  document.querySelector('.filter-bar').style.display    = isStr  ? 'flex' : 'none';
+  document.querySelector('.filter-bar').style.display    = (isStr||isCon) ? 'flex' : 'none';
   document.querySelector('.strat-desc').style.display    = isStr  ? 'flex' : 'none';
-  document.querySelector('.progress-wrap').style.display = isStr  ? 'block' : 'none';
+  document.querySelector('.progress-wrap').style.display = (isStr||isCon) ? 'block' : 'none';
   if (isDash && !dashLoaded) loadDashboard();
   if (isSec  && !sectorsLoaded) loadSectorHeatmap();
+  if (isWL) renderWatchlist();
+  if (isCon && !_consensusData) renderConsensusEmpty();
+  saveSettings();
 }
 
 // ── dashboard data & render ───────────────────────────────────────────────────
@@ -1117,6 +1182,7 @@ function setStrategy(s) {
   document.querySelectorAll('.stab').forEach(b=>b.classList.toggle('active', b.id==='stab-'+s));
   document.getElementById('stratDescText').textContent = STRAT_META[s].desc;
   if (allRows.length) renderTable();
+  saveSettings();
 }
 
 // init
@@ -1131,6 +1197,7 @@ function setPreset(m) {
   });
   document.getElementById('customDate').classList.remove('show');
   document.getElementById('customBtn').classList.remove('active');
+  saveSettings();
 }
 function toggleCustom() {
   isCustom=!isCustom;
@@ -1156,6 +1223,45 @@ async function loadSectors(universe) {
   } catch(_){}
 }
 function onUniverseChange(){ loadSectors(document.getElementById('universe').value); }
+// ── settings persistence ─────────────────────────────────────────────────
+const SETTINGS_KEY = 'momentum_settings_v1';
+function saveSettings() {
+  try {
+    const s = {
+      universe: document.getElementById('universe')?.value,
+      sector_filter: document.getElementById('sector_filter')?.value,
+      strategy,
+      activePreset,
+      isCustom,
+      balanceSectorsOn,
+      view: document.querySelector('.vtab.active')?.id?.replace('vtab-','') || 'dashboard',
+    };
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
+  } catch(_){}
+}
+function loadSettings() {
+  try {
+    const s = JSON.parse(localStorage.getItem(SETTINGS_KEY)||'null');
+    if (!s) return;
+    if (s.universe) {
+      const u = document.getElementById('universe');
+      if (u) u.value = s.universe;
+    }
+    if (s.activePreset) setPreset(s.activePreset);
+    if (s.strategy && STRAT_META[s.strategy]) setStrategy(s.strategy);
+    if (s.balanceSectorsOn) {
+      balanceSectorsOn = true;
+      document.getElementById('balanceSwitch')?.classList.add('on');
+    }
+    if (s.view && s.view !== 'dashboard') {
+      setTimeout(()=>setView(s.view), 0);
+    }
+  } catch(_){}
+}
+// hook saveSettings into existing change events
+document.getElementById('universe')?.addEventListener('change', saveSettings);
+document.getElementById('sector_filter')?.addEventListener('change', saveSettings);
+
 loadSectors('nasdaq100');
 
 // ── SSE ───────────────────────────────────────────────────────────────────────
@@ -1450,6 +1556,7 @@ let balanceSectorsOn = false;
 function toggleBalance() {
   balanceSectorsOn = !balanceSectorsOn;
   document.getElementById('balanceSwitch').classList.toggle('on', balanceSectorsOn);
+  saveSettings();
 }
 
 async function runCalc() {
@@ -1587,7 +1694,16 @@ function renderDetail({info,prices}, row) {
       <div style="font-size:11px;color:var(--text3);margin-top:6px;display:flex;justify-content:space-between">
         <span>风险回报比 <strong style="color:var(--accent)">${row.risk_reward}:1</strong></span>
         <span>ATR(14) 倍数法</span>
-      </div>`;
+      </div>
+      <div class="sizer-box">
+        <div style="font-size:11px;font-weight:700;color:var(--text2)">💰 仓位计算（1% 法则）</div>
+        <div class="sizer-row">
+          账户 $<input id="sizerAcct" type="number" value="100000" oninput="computeSize('${row.ticker}')">
+          单笔风险 <input id="sizerRisk" type="number" value="1" step="0.5" oninput="computeSize('${row.ticker}')">%
+        </div>
+        <div class="sizer-result" id="sizerOut"><span>调整账户/风险查看</span><b>—</b></div>
+      </div>
+      <button onclick="addCurrentToWatchlist()" style="width:100%;margin-top:8px;padding:7px;border-radius:5px;border:1px solid var(--accent);background:#fff;color:var(--accent);font-weight:700;cursor:pointer;font-size:12px">📌 加入自选（含止损/目标）</button>`;
   }
 
   // strategy-specific stat cards
@@ -1738,6 +1854,15 @@ function renderDetail({info,prices}, row) {
         ${info.inst_hold!=null?kv('机构持仓',fp(info.inst_hold/100),null,false):''}
       </div>
     </div>
+    ${(info.analyst_target && row.target) ? `
+    <div class="analyst-compare">
+      <span style="color:var(--text2)">分析师共识 <b style="color:var(--text);font-variant-numeric:tabular-nums">$${info.analyst_target.toFixed(2)}</b></span>
+      <span style="color:var(--text2)">vs 我们 <b style="color:var(--accent);font-variant-numeric:tabular-nums">$${row.target}</b>
+        <span style="color:${row.target > info.analyst_target * 1.1 ? 'var(--amber)' : row.target < info.analyst_target * 0.9 ? 'var(--green)' : 'var(--text3)'};font-size:10px;margin-left:4px">
+          ${row.target > info.analyst_target * 1.1 ? '⚠ 比共识高 ' + ((row.target/info.analyst_target-1)*100).toFixed(0) + '%，可能过乐观' : row.target < info.analyst_target * 0.9 ? '✓ 比共识低，更保守可信' : '与共识接近'}
+        </span>
+      </span>
+    </div>` : ''}
     <div>
       <div class="sec-head">分析师</div>
       <div class="kv-list">
@@ -1750,6 +1875,8 @@ function renderDetail({info,prices}, row) {
     </div>`;
 
   drawChart(cid, prices, document.getElementById('cl'));
+  // 自动算一次仓位
+  setTimeout(()=>{ if(row.ticker && row.stop!=null) computeSize(row.ticker); }, 100);
 }
 
 function kv(label,val,raw,colorize){
@@ -1937,6 +2064,306 @@ async function loadSectorHeatmap(force = false) {
     stat.textContent = '加载失败：' + e.message;
     wrap.innerHTML = `<div class="empty-state"><p style="color:var(--red)">加载失败：${esc(e.message)}</p></div>`;
   }
+}
+
+// ── watchlist (localStorage-backed) ──────────────────────────────────────────
+const WL_KEY = 'momentum_watchlist_v1';
+function loadWL() {
+  try { return JSON.parse(localStorage.getItem(WL_KEY) || '[]'); } catch(_) { return []; }
+}
+function saveWL(list) {
+  try { localStorage.setItem(WL_KEY, JSON.stringify(list)); } catch(_){}
+  updateWLBadge();
+}
+function updateWLBadge() {
+  const list = loadWL();
+  const el = document.getElementById('wlCount');
+  if (!el) return;
+  if (list.length) {
+    el.style.display = 'inline-block';
+    el.textContent = list.length;
+  } else el.style.display = 'none';
+}
+function addToWatchlist(ticker, name, sector, entry, stop, target) {
+  const list = loadWL();
+  if (list.some(w => w.ticker === ticker)) {
+    alert(ticker + ' 已在自选');
+    return;
+  }
+  list.push({
+    ticker, name: name||'', sector: sector||'',
+    entry: parseFloat(entry), stop: parseFloat(stop)||null,
+    target: parseFloat(target)||null,
+    added: new Date().toISOString().slice(0,10),
+  });
+  saveWL(list);
+  alert('已加入自选');
+}
+function removeWatch(ticker) {
+  if (!confirm('确定从自选移除 ' + ticker + '?')) return;
+  saveWL(loadWL().filter(w => w.ticker !== ticker));
+  renderWatchlist();
+}
+
+async function fetchCurrentPrice(ticker) {
+  try {
+    const d = await (await fetch('/api/detail/' + ticker + '?months=1')).json();
+    const last = d.prices && d.prices.length ? d.prices[d.prices.length-1].close : null;
+    return last;
+  } catch(_) { return null; }
+}
+
+async function renderWatchlist() {
+  const list = loadWL();
+  const panel = document.getElementById('watchlistPanel');
+  updateWLBadge();
+
+  let formHtml = `
+    <div class="wl-add-form">
+      <div><label>股票代码</label><input id="wlTk" placeholder="NVDA" maxlength="8"></div>
+      <div><label>买入价</label><input id="wlEntry" type="number" step="0.01" placeholder="123.45"></div>
+      <div><label>止损位</label><input id="wlStop" type="number" step="0.01" placeholder="115.00"></div>
+      <div><label>目标价</label><input id="wlTgt" type="number" step="0.01" placeholder="145.00"></div>
+      <div><label>买入日期</label><input id="wlDate" type="date" value="${new Date().toISOString().slice(0,10)}"></div>
+      <button class="wl-add-btn" onclick="wlAddManual()">+ 添加</button>
+    </div>`;
+
+  if (!list.length) {
+    panel.innerHTML = formHtml + `
+      <div class="wl-empty">
+        <div style="font-size:48px;opacity:.2">📌</div>
+        <p style="margin-top:10px">自选列表为空</p>
+        <small>从策略表点击股票详情页 → 「加入自选」，或上方手动添加</small>
+      </div>`;
+    return;
+  }
+
+  panel.innerHTML = formHtml + `
+    <div style="display:flex;align-items:center;justify-content:center;gap:8px;padding:20px;color:var(--text3)">
+      <div class="spinner"></div><span>拉取最新价格…</span>
+    </div>`;
+
+  // 并发拉所有当前价
+  const prices = await Promise.all(list.map(w => fetchCurrentPrice(w.ticker)));
+
+  let rows = '';
+  list.forEach((w, i) => {
+    const cur = prices[i];
+    if (cur == null) {
+      rows += `<tr><td><b>${esc(w.ticker)}</b></td><td colspan="6" style="color:var(--text3)">未能获取当前价</td><td><button class="wl-del" onclick="removeWatch('${esc(w.ticker)}')">✕</button></td></tr>`;
+      return;
+    }
+    const pnl = ((cur - w.entry) / w.entry) * 100;
+    const pnlC = pnl >= 0 ? 'pos' : 'neg';
+
+    // 距止损 / 目标
+    let progHtml = '<span style="color:var(--text3)">—</span>';
+    if (w.stop != null && w.target != null && w.stop < w.target) {
+      const span = w.target - w.stop;
+      const nowPos = Math.max(0, Math.min(100, ((cur - w.stop) / span) * 100));
+      progHtml = `<div class="wl-prog">
+        <div class="wl-prog-stop" style="width:${nowPos*0.5}%"></div>
+        <div class="wl-prog-tgt"  style="left:${nowPos}%;width:${100-nowPos}%"></div>
+        <div class="wl-prog-now"  style="left:calc(${nowPos}% - 1px)"></div>
+      </div>
+      <div style="font-size:10px;color:var(--text3);margin-top:3px;display:flex;justify-content:space-between">
+        <span>止损 $${w.stop}</span><span>目标 $${w.target}</span>
+      </div>`;
+    }
+
+    const stopDist  = w.stop  != null ? ((cur - w.stop)  / cur * 100).toFixed(1) : null;
+    const tgtDist   = w.target!= null ? ((w.target - cur) / cur * 100).toFixed(1) : null;
+    const stopWarn  = stopDist != null && parseFloat(stopDist) < 2;
+    const tgtClose  = tgtDist != null && parseFloat(tgtDist) < 5;
+
+    rows += `<tr>
+      <td>
+        <div style="font-weight:700;cursor:pointer;color:var(--accent)" onclick="loadDetail('${esc(w.ticker)}')">${esc(w.ticker)}</div>
+        <div style="font-size:10px;color:var(--text3)">${esc(w.sector||'')}</div>
+      </td>
+      <td style="font-variant-numeric:tabular-nums">$${w.entry}</td>
+      <td style="font-variant-numeric:tabular-nums">$${cur.toFixed(2)}</td>
+      <td><span class="wl-pnl ${pnlC}">${pnl>0?'+':''}${pnl.toFixed(2)}%</span></td>
+      <td style="min-width:140px">${progHtml}</td>
+      <td><span class="${stopWarn?'neg':'neu'}" style="font-weight:${stopWarn?'700':'400'}">${stopDist!=null?stopDist+'%':'—'}</span></td>
+      <td><span class="${tgtClose?'pos':'neu'}" style="font-weight:${tgtClose?'700':'400'}">${tgtDist!=null?tgtDist+'%':'—'}</span></td>
+      <td style="color:var(--text3);font-size:11px">${esc(w.added)}</td>
+      <td><button class="wl-del" onclick="removeWatch('${esc(w.ticker)}')">✕</button></td>
+    </tr>`;
+  });
+
+  panel.innerHTML = formHtml + `
+    <table class="wl-table">
+      <thead><tr>
+        <th>股票</th><th>买入价</th><th>当前价</th><th>盈亏%</th>
+        <th>位置</th><th>距止损</th><th>距目标</th><th>加入</th><th></th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div style="font-size:11px;color:var(--text3);margin-top:10px">
+      💡 距止损 &lt; 2% 红色加粗 — 考虑减仓或上调止损 · 距目标 &lt; 5% 绿色加粗 — 考虑分批止盈
+    </div>`;
+}
+
+function wlAddManual() {
+  const tk = document.getElementById('wlTk').value.trim().toUpperCase();
+  const e  = document.getElementById('wlEntry').value;
+  const s  = document.getElementById('wlStop').value;
+  const t  = document.getElementById('wlTgt').value;
+  const d  = document.getElementById('wlDate').value;
+  if (!tk || !e) { alert('股票代码和买入价必填'); return; }
+  const list = loadWL();
+  if (list.some(w => w.ticker === tk)) { alert(tk + ' 已在自选'); return; }
+  list.push({
+    ticker: tk, name:'', sector:'',
+    entry: parseFloat(e),
+    stop:  s ? parseFloat(s) : null,
+    target:t ? parseFloat(t) : null,
+    added: d || new Date().toISOString().slice(0,10),
+  });
+  saveWL(list);
+  renderWatchlist();
+}
+
+updateWLBadge();
+
+// ── consensus (跨策略叠加榜) ─────────────────────────────────────────────────
+let _consensusData = null;
+
+function renderConsensusEmpty() {
+  document.getElementById('consensusPanel').innerHTML = `
+    <div class="empty-state">
+      <div class="icon">⭐</div>
+      <p>点击右上角「跑叠加榜」</p>
+      <small>同时跑 7 个策略，按入选次数排序<br/>5次以上=高确信、3-4次=中等、1-2次=单一信号</small>
+    </div>`;
+}
+
+async function runConsensus() {
+  const btn = document.getElementById('runConsensusBtn');
+  btn.disabled = true;
+  setStatus('running', '叠加榜计算中…'); setProgress(2);
+  document.getElementById('consensusPanel').innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:center;gap:8px;padding:60px;color:var(--text3)">
+      <div class="spinner"></div><span>正在跑 7 个策略，按当前股票池和区间筛选…</span>
+    </div>`;
+  try {
+    const body = {
+      universe: document.getElementById('universe').value,
+      sector_filter: document.getElementById('sector_filter').value,
+      months: isCustom?6:activePreset,
+      top_n: 10,
+    };
+    const r = await fetch('/api/consensus', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)
+    });
+    const d = await r.json();
+    if (d.error) {
+      document.getElementById('consensusPanel').innerHTML = `<div style="color:var(--red);padding:20px">${esc(d.error)}</div>`;
+      btn.disabled = false; return;
+    }
+  } catch(e) {
+    document.getElementById('consensusPanel').innerHTML = `<div style="color:var(--red);padding:20px">${esc(e.message)}</div>`;
+    btn.disabled = false;
+  }
+}
+
+const STRAT_SHORT = {
+  momentum:         '动量',
+  momentum_quality: '质量动量',
+  low_vol:          '低波',
+  dual_momentum:    '双动量',
+  multifactor:      '多因子',
+  high52w:          '52W新高',
+  connors_rsi:      'Connors',
+};
+
+function renderConsensus(data) {
+  _consensusData = data;
+  document.getElementById('runConsensusBtn').disabled = false;
+  setStatus('done', `叠加榜完成 · ${data.rows.length} 只候选`);
+  setProgress(100);
+  setTimeout(()=>setProgress(0), 1500);
+
+  const rows = data.rows;
+  if (!rows.length) {
+    document.getElementById('consensusPanel').innerHTML = `<div class="empty-state">没有任何股票被多个策略选中</div>`;
+    return;
+  }
+
+  let html = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+      <div>
+        <h3 style="margin:0;font-size:14px">高确信度叠加榜 · ${data.strategies.length} 个策略</h3>
+        <p style="margin:3px 0 0;font-size:11px;color:var(--text3)">每个策略选前 ${data.top_n} 名，按重叠出现次数排序</p>
+      </div>
+      <div style="display:flex;gap:6px;font-size:11px">
+        <span style="display:inline-flex;align-items:center;gap:4px"><span style="width:10px;height:10px;background:#16a34a;border-radius:2px"></span>≥5 高确信</span>
+        <span style="display:inline-flex;align-items:center;gap:4px"><span style="width:10px;height:10px;background:#d97706;border-radius:2px"></span>3-4 中</span>
+        <span style="display:inline-flex;align-items:center;gap:4px"><span style="width:10px;height:10px;background:#9ca3af;border-radius:2px"></span>1-2 单</span>
+      </div>
+    </div>
+    <div class="consensus-grid">`;
+
+  rows.forEach(r => {
+    const tier = r.count >= 5 ? 'tier-1' : r.count >= 3 ? 'tier-2' : 'tier-3';
+    const strats = Object.entries(r.ranks).map(([k,v])=>
+      `<span class="cs-strat-tag">${esc(STRAT_SHORT[k]||k)} <b>#${v}</b></span>`
+    ).join('');
+    html += `
+      <div class="cs-card ${tier}">
+        <div class="cs-head">
+          <div>
+            <div class="cs-tk" onclick="loadDetail('${esc(r.ticker)}')">${esc(r.ticker)}</div>
+            <div class="cs-name" title="${esc(r.name||'')}">${esc(r.name||'')}</div>
+          </div>
+          <div class="cs-badge">${r.count}<span style="font-size:10px;font-weight:600">/ ${data.strategies.length}</span></div>
+        </div>
+        <div class="cs-strats">${strats}</div>
+        <div class="cs-meta">
+          <span>板块 ${esc(r.sector||'—')}</span>
+          <span>平均排名 #${r.avg_rank}</span>
+        </div>
+      </div>`;
+  });
+  html += '</div>';
+  document.getElementById('consensusPanel').innerHTML = html;
+}
+
+// SSE: register consensus_done — re-hook into connectSSE
+function _hookConsensusSSE() {
+  if (!evtSource) return;
+  evtSource.addEventListener('consensus_done', e => {
+    try { renderConsensus(JSON.parse(e.data)); } catch(_){}
+  });
+}
+setTimeout(_hookConsensusSSE, 500);
+setTimeout(loadSettings, 100);
+
+// ── position sizer (used inside detail panel) ────────────────────────────────
+function computeSize(ticker) {
+  const acct = parseFloat(document.getElementById('sizerAcct')?.value || 100000);
+  const risk = parseFloat(document.getElementById('sizerRisk')?.value || 1);
+  const row = allRows.find(r=>r.ticker===ticker);
+  if (!row || row.price==null || row.stop==null) return;
+  const riskUSD = acct * risk / 100;
+  const perShareRisk = row.price - row.stop;
+  if (perShareRisk <= 0) return;
+  const shares = Math.floor(riskUSD / perShareRisk);
+  const positionUSD = shares * row.price;
+  const positionPct = (positionUSD / acct * 100).toFixed(1);
+  document.getElementById('sizerOut').innerHTML =
+    `<span>${shares} 股 ≈ $${positionUSD.toLocaleString(undefined,{maximumFractionDigits:0})} (${positionPct}% 账户)</span><b>${shares}</b>`;
+}
+
+// ── add-to-watchlist from detail panel ────────────────────────────────────────
+function addCurrentToWatchlist() {
+  const tk = document.getElementById('dTicker')?.textContent;
+  if (!tk || tk === '—') return;
+  const row = allRows.find(r=>r.ticker===tk);
+  if (!row) return;
+  if (row.price == null) { alert('当前价不可用'); return; }
+  addToWatchlist(row.ticker, row.name, row.sector, row.price, row.stop, row.target);
 }
 
 </script>

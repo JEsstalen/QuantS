@@ -1705,6 +1705,99 @@ def api_backtest():
     threading.Thread(target=run_release, daemon=True).start()
     return jsonify({"ok": True})
 
+_consensus_cache: dict = {}
+_CONSENSUS_TTL = 1800   # 30 分钟
+
+@app.route("/api/consensus", methods=["POST"])
+def api_consensus():
+    """跨策略叠加榜：把所有策略各自的前 N 名汇总，按出现次数排序
+    NOTE: 共享 _calc_lock 避免和 /api/run 并发跑同一份股票池
+    """
+    body = request.json or {}
+    universe = body.get("universe", "nasdaq100")
+    sector_filter = body.get("sector_filter", "")
+    months = int(body.get("months", 6))
+    top_n  = int(body.get("top_n", 10))
+
+    cache_key = f"{universe}|{sector_filter}|{months}|{top_n}"
+    import time as _t
+    entry = _consensus_cache.get(cache_key)
+    if entry and _t.time() - entry[0] < _CONSENSUS_TTL:
+        return jsonify(entry[1])
+
+    if not _calc_lock.acquire(blocking=False):
+        return jsonify({"error": "已有任务运行中，请稍候"}), 429
+
+    def worker():
+        try:
+            import pandas as pd
+            meta = build_universe(universe, sector_filter)
+            # 不同策略需要的最小窗口不同，统一拉 12 个月够所有用
+            m = max(months, 12)
+            start_str, end_str = resolve_dates(None, None, m)
+            log(f"叠加榜：拉取 {start_str} → {end_str} 价格…", 8)
+            prices = load_prices(meta["Ticker"].tolist(), start_str, end_str)
+
+            # 选要跑的策略（排除非常慢的 piotroski - 它要拉财报）
+            strats = ["momentum","momentum_quality","low_vol","dual_momentum",
+                      "multifactor","high52w","connors_rsi"]
+            # piotroski 需要单独拉财报，太慢，叠加榜里跳过
+
+            ticker_score = {}     # ticker -> {"count":n, "ranks":{strat:rank}, "name":..., "sector":..., "price":...}
+            for si, sk in enumerate(strats):
+                pct = 12 + int(si / len(strats) * 80)
+                log(f"叠加榜：跑策略 {sk} ({si+1}/{len(strats)})…", pct)
+                try:
+                    fn = STRATEGIES.get(sk)
+                    df = fn(prices, meta, start_str, end_str)
+                    top = df.head(top_n)
+                    for _, row in top.iterrows():
+                        tk = row.get("ticker")
+                        if not tk: continue
+                        entry = ticker_score.setdefault(tk, {
+                            "ticker": tk,
+                            "name":   row.get("name", ""),
+                            "sector": row.get("sector", "N/A"),
+                            "price":  row.get("price"),
+                            "count":  0,
+                            "ranks":  {},
+                        })
+                        entry["count"] += 1
+                        entry["ranks"][sk] = int(row.get("rank")) if row.get("rank") is not None else None
+                except Exception as e:
+                    log(f"叠加榜：策略 {sk} 失败：{e}", pct)
+                    continue
+
+            # 按出现次数排序，相同次数按平均排名升序
+            def _avg_rank(item):
+                ranks = [r for r in item["ranks"].values() if r is not None]
+                return sum(ranks)/len(ranks) if ranks else 999
+            results = sorted(ticker_score.values(),
+                             key=lambda x: (-x["count"], _avg_rank(x)))
+            for i, r in enumerate(results):
+                r["overall_rank"] = i + 1
+                r["avg_rank"] = round(_avg_rank(r), 1)
+
+            payload = {
+                "rows":      results[:30],
+                "strategies": strats,
+                "universe":  universe,
+                "months":    m,
+                "top_n":     top_n,
+            }
+            _consensus_cache[cache_key] = (_t.time(), payload)
+            _broadcast("consensus_done", payload)
+            log("叠加榜完成", 100)
+        except Exception as e:
+            _broadcast("error", {"msg": "叠加榜失败：" + str(e)})
+
+    def run_release():
+        try: worker()
+        finally: _calc_lock.release()
+
+    threading.Thread(target=run_release, daemon=True).start()
+    return jsonify({"ok": True})
+
 @app.route("/api/sectors")
 def api_sectors():
     import pandas as pd
