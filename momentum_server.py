@@ -1160,6 +1160,77 @@ STRATEGIES = {
     "connors_rsi":      calc_connors_rsi,
 }
 
+# ─── 目标价 / 止损测算（前10名）─────────────────────────────────────────────
+# 用 ATR(14) 倍数法 + 期限分组，参考 Welles Wilder 经典思路
+# short  : 持有 2-5 天   止损 1.5R 目标 1.5R（mean reversion，看 MA20）
+# mid    : 持有 1-3 月   止损 2.0R 目标 4.0R（2:1 风险回报）
+# long   : 持有 6-18 月  止损 2.5R 目标 7.5R（3:1 风险回报）
+_TERM_MAP = {
+    "connors_rsi":      ("short", 1.5, 1.5, "2-5天",  "mean reversion → MA20"),
+    "momentum":         ("mid",   2.0, 4.0, "1-3月",  "动量延续，2:1 R:R"),
+    "momentum_quality": ("mid",   2.0, 4.0, "1-3月",  "质量动量，2:1 R:R"),
+    "low_vol":          ("mid",   1.8, 3.0, "1-3月",  "低波动，紧止损"),
+    "dual_momentum":    ("mid",   2.0, 4.0, "1-3月",  "双动量，2:1 R:R"),
+    "multifactor":      ("mid",   2.0, 4.0, "1-3月",  "多因子，2:1 R:R"),
+    "piotroski":        ("long",  2.5, 7.5, "6-18月", "基本面长线，3:1 R:R"),
+    "high52w":          ("long",  2.5, 7.5, "6-18月", "52W动量长线，3:1 R:R"),
+}
+
+def _atr(prices, ticker, n=14):
+    """ATR(n) — 用日收盘价近似（缺 H/L 数据时的简化版）"""
+    import pandas as pd, numpy as np
+    s = prices[ticker].dropna()
+    if len(s) < n+1: return None
+    # 用日收益绝对值近似 True Range（无 high/low/close 完整数据时的常见做法）
+    tr = s.diff().abs()
+    atr = tr.rolling(n).mean().iloc[-1]
+    if pd.isna(atr) or atr <= 0: return None
+    return float(atr)
+
+def _add_targets(df, prices, strategy):
+    """给前10名计算目标价 / 止损 / 风险回报比"""
+    import pandas as pd, numpy as np
+    if df.empty: return df
+    term, stop_mult, target_mult, horizon, basis = _TERM_MAP.get(
+        strategy, ("mid", 2.0, 4.0, "1-3月", "2:1 R:R"))
+
+    df["term"]    = term
+    df["horizon"] = horizon
+    df["target"]      = None
+    df["stop"]        = None
+    df["risk_reward"] = None
+    df["upside_pct"]  = None
+    df["downside_pct"]= None
+
+    for i in df.head(10).index:
+        ticker = df.at[i, "ticker"]
+        if ticker not in prices.columns: continue
+        entry = df.at[i, "price"]
+        if entry is None or pd.isna(entry): continue
+        atr = _atr(prices, ticker, 14)
+        if atr is None: continue
+
+        stop_price   = entry - stop_mult   * atr
+        target_price = entry + target_mult * atr
+
+        # Connors 短线：目标改用 MA20（mean reversion 经典）
+        if strategy == "connors_rsi":
+            s = prices[ticker].dropna()
+            if len(s) >= 20:
+                ma20 = float(s.tail(20).mean())
+                target_price = max(target_price, ma20)  # 取两者较高，确保反弹空间
+
+        upside   = (target_price/entry - 1) * 100
+        downside = (1 - stop_price/entry)   * 100
+        rr = target_mult / stop_mult
+
+        df.at[i, "target"]       = round(float(target_price), 2)
+        df.at[i, "stop"]         = round(float(stop_price),   2)
+        df.at[i, "upside_pct"]   = round(float(upside),       2)
+        df.at[i, "downside_pct"] = round(float(downside),     2)
+        df.at[i, "risk_reward"]  = round(float(rr),           2)
+    return df
+
 # ─── 详情接口 ─────────────────────────────────────────────────────────────────
 
 @app.route("/api/detail/<ticker>")
@@ -1211,6 +1282,7 @@ def api_run():
             prices = load_prices(meta["Ticker"].tolist(), start_str, end_str)
             fn = STRATEGIES.get(strategy, calc_momentum)
             df = fn(prices, meta, start_str, end_str)
+            df = _add_targets(df, prices, strategy)
             rows = df.head(100).to_dict(orient="records")
             _broadcast("done", {"rows": rows, "start": start_str, "end": end_str, "strategy": strategy})
         except Exception as e:

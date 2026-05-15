@@ -22,6 +22,20 @@ body{display:flex;flex-direction:column;height:100vh;overflow:hidden}
 .logo em{font-style:normal;color:var(--accent)}
 
 /* strategy tabs */
+.term-label{font-size:10px;font-weight:800;letter-spacing:.05em;padding:0 8px;color:var(--text3);text-transform:uppercase;display:flex;align-items:center;flex-shrink:0;height:38px}
+.term-label.term-short{color:#dc2626}
+.term-label.term-mid  {color:#d97706}
+.term-label.term-long {color:#15803d}
+.term-sep{width:1px;height:20px;background:var(--border);margin:0 6px;flex-shrink:0;align-self:center}
+.tgt-cell{display:flex;flex-direction:column;align-items:flex-start;gap:1px;font-size:11px}
+.tgt-cell .v{font-weight:700;font-variant-numeric:tabular-nums}
+.tgt-cell .pct{font-size:10px;font-variant-numeric:tabular-nums}
+.rr-badge{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:700;background:rgba(37,99,235,.1);color:var(--accent)}
+.rr-badge.rr-low{background:var(--surface2);color:var(--text3)}
+.tgt-bar{display:flex;align-items:stretch;height:8px;border-radius:4px;overflow:hidden;border:1px solid var(--border);margin-top:6px}
+.tgt-bar-stop{background:rgba(220,38,38,.6)}
+.tgt-bar-now{background:#fff;border-left:1px solid var(--accent);border-right:1px solid var(--accent);flex-shrink:0}
+.tgt-bar-target{background:rgba(22,163,74,.6)}
 .strategy-bar{
   display:flex;align-items:center;gap:0;padding:0 20px;
   border-bottom:1px solid var(--border);overflow-x:auto;
@@ -370,29 +384,34 @@ tr.selected td:first-child{border-left:2px solid var(--accent);padding-left:10px
 
   <!-- strategy tabs (only in strategy view) -->
   <div class="strategy-bar" id="strategyBar">
+    <span class="term-label term-short">短线 · 2-30天</span>
+    <button class="stab" id="stab-connors_rsi" onclick="setStrategy('connors_rsi')">
+      ⚡ Connors RSI(2) <span class="stab-badge">超卖反弹</span>
+    </button>
+    <span class="term-sep"></span>
+    <span class="term-label term-mid">中线 · 1-3月</span>
     <button class="stab active" id="stab-momentum" onclick="setStrategy('momentum')">
       📈 纯动量 <span class="stab-badge">Momentum</span>
     </button>
     <button class="stab" id="stab-momentum_quality" onclick="setStrategy('momentum_quality')">
-      ⚡ 动量+质量 <span class="stab-badge">Quality Filter</span>
+      ⚡ 动量+质量 <span class="stab-badge">Quality</span>
     </button>
     <button class="stab" id="stab-low_vol" onclick="setStrategy('low_vol')">
-      🛡 低波动率 <span class="stab-badge">Low Vol</span>
-    </button>
-    <button class="stab" id="stab-piotroski" onclick="setStrategy('piotroski')">
-      📋 F-Score <span class="stab-badge">Piotroski</span>
+      🛡 低波动 <span class="stab-badge">Low Vol</span>
     </button>
     <button class="stab" id="stab-dual_momentum" onclick="setStrategy('dual_momentum')">
-      🔁 双动量 <span class="stab-badge">Dual Momentum</span>
+      🔁 双动量 <span class="stab-badge">Dual</span>
     </button>
     <button class="stab" id="stab-multifactor" onclick="setStrategy('multifactor')">
       🧮 多因子 <span class="stab-badge">Z-Score</span>
     </button>
-    <button class="stab" id="stab-high52w" onclick="setStrategy('high52w')">
-      🚀 52周新高 <span class="stab-badge">George 2004</span>
+    <span class="term-sep"></span>
+    <span class="term-label term-long">长线 · 6-18月</span>
+    <button class="stab" id="stab-piotroski" onclick="setStrategy('piotroski')">
+      📋 F-Score <span class="stab-badge">Piotroski</span>
     </button>
-    <button class="stab" id="stab-connors_rsi" onclick="setStrategy('connors_rsi')">
-      ⚡ Connors RSI(2) <span class="stab-badge">短线超卖</span>
+    <button class="stab" id="stab-high52w" onclick="setStrategy('high52w')">
+      🚀 52W新高 <span class="stab-badge">George 2004</span>
     </button>
   </div>
 
@@ -532,42 +551,42 @@ const STRAT_META = {
   momentum: {
     desc: "月度收益率算术均值，捕捉持续上涨趋势；适合趋势明确的牛市行情",
     sortKey: "mom_mean", sortAsc: false,
-    cols: ["rank","ticker","sector","price","mom_mean","total_ret","sharpe","max_dd","short_float","inst_hold"],
+    cols: ["rank","ticker","sector","price","mom_mean","total_ret","sharpe","max_dd","short_float","inst_hold","target","stop","risk_reward","horizon"],
   },
   momentum_quality: {
     desc: "动量(50%) + ROE(30%) + 净利润率(20%) 综合打分，过滤基本面差的动量股",
     sortKey: "composite", sortAsc: false,
-    cols: ["rank","ticker","sector","price","composite","mom_mean","roe","profit_margin","max_dd","short_float","inst_hold"],
+    cols: ["rank","ticker","sector","price","composite","mom_mean","roe","profit_margin","max_dd","short_float","inst_hold","target","stop","risk_reward","horizon"],
   },
   low_vol: {
     desc: "以 Beta 和年化波动率升序排列，优先低风险品种；适合震荡市或防御配置",
     sortKey: "beta", sortAsc: true,
-    cols: ["rank","ticker","sector","price","beta","ann_vol","total_ret","mom_mean","max_dd"],
+    cols: ["rank","ticker","sector","price","beta","ann_vol","total_ret","mom_mean","max_dd","target","stop","risk_reward","horizon"],
   },
   piotroski: {
     desc: "Piotroski F-Score：9项财务健康指标（盈利/杠杆/效率各3项），满分9分",
     sortKey: "fscore", sortAsc: false,
-    cols: ["rank","ticker","sector","price","fscore","f_profit","f_leverage","f_efficiency","roa","gross_margin"],
+    cols: ["rank","ticker","sector","price","fscore","f_profit","f_leverage","f_efficiency","roa","gross_margin","target","stop","risk_reward","horizon"],
   },
   dual_momentum: {
     desc: "两层过滤：① 绝对动量 — 总收益 > 3M国债收益率，不过线的排到末尾；② 剩余按相对动量排序",
     sortKey: "mom_mean", sortAsc: false,
-    cols: ["rank","ticker","sector","price","abs_pass","mom_mean","rf_hurdle","total_ret","sharpe","max_dd"],
+    cols: ["rank","ticker","sector","price","abs_pass","mom_mean","rf_hurdle","total_ret","sharpe","max_dd","target","stop","risk_reward","horizon"],
   },
   multifactor: {
     desc: "多因子 Z-Score 合成：动量35% + ROE25% + 净利润率15% + 低Beta15% + 低PS10%",
     sortKey: "mf_score", sortAsc: false,
-    cols: ["rank","ticker","sector","price","mf_score","mom_mean","roe","profit_margin","beta","ps","short_float","inst_hold"],
+    cols: ["rank","ticker","sector","price","mf_score","mom_mean","roe","profit_margin","beta","ps","short_float","inst_hold","target","stop","risk_reward","horizon"],
   },
   high52w: {
     desc: "George & Hwang 2004（JoF）：距52周高点越近的股票未来半年至一年持续走强；双重过滤=200日均线之上+正向月动量",
     sortKey: "dist_high", sortAsc: false,
-    cols: ["rank","ticker","sector","price","dist_high","passed","high_52w","from_low","above_ma200","mom_mean"],
+    cols: ["rank","ticker","sector","price","dist_high","passed","high_52w","from_low","above_ma200","mom_mean","target","stop","risk_reward","horizon"],
   },
   connors_rsi: {
     desc: "Larry Connors 短线 mean reversion：200日均线之上+RSI(2)<5 极度超卖→反弹至5日均线之上卖出；持有 2-5 天",
     sortKey: "rsi2", sortAsc: true,
-    cols: ["rank","ticker","sector","price","signal","rsi2","rsi14","from_ma200","ma5","above_ma200"],
+    cols: ["rank","ticker","sector","price","signal","rsi2","rsi14","from_ma200","ma5","above_ma200","target","stop","risk_reward","horizon"],
   },
 };
 
@@ -652,6 +671,21 @@ const COL_DEF = {
     return `<span class="num ${c}">${v>0?'+':''}${v}%</span>`;
   }},
   signal:       { label:'入场信号',     fmt:(v)=>v?'<span style="color:var(--green);font-weight:700;font-size:12px">✓ 买入</span>':'<span style="color:var(--text3);font-size:12px">—</span>' },
+  // 目标价/止损（仅前10名）
+  target:       { label:'目标价',       fmt:(v,r)=>{
+    if(v==null) return '<span class="neu">—</span>';
+    return `<div class="tgt-cell"><span class="v pos">$${v}</span><span class="pct pos">+${r.upside_pct}%</span></div>`;
+  }},
+  stop:         { label:'止损位',       fmt:(v,r)=>{
+    if(v==null) return '<span class="neu">—</span>';
+    return `<div class="tgt-cell"><span class="v neg">$${v}</span><span class="pct neg">-${r.downside_pct}%</span></div>`;
+  }},
+  risk_reward:  { label:'R:R',           fmt:(v)=>{
+    if(v==null) return '<span class="neu">—</span>';
+    const cls = v>=3?'':v>=2?'':'rr-low';
+    return `<span class="rr-badge ${cls}">${v}:1</span>`;
+  }},
+  horizon:      { label:'持有期',       fmt:(v)=>v?`<span class="num" style="color:var(--text2);font-size:11px">${v}</span>`:'—' },
 };
 
 function fPips(v, total) {
@@ -1192,6 +1226,44 @@ function renderDetail({info,prices}, row) {
   }
   const mc=(row.mom_mean||0)>=0?'g':'r', rc=(row.total_ret||0)>=0?'g':'r';
 
+  // universal target / stop card (only present for top-10 rows)
+  let targetCard='';
+  if (row.target!=null && row.stop!=null) {
+    const price = row.price;
+    const stop = row.stop, target = row.target;
+    // bar positioning: stop -> price -> target
+    const span = target - stop;
+    const stopToPrice = ((price-stop)/span*100).toFixed(1);
+    const priceToTarget = ((target-price)/span*100).toFixed(1);
+    const termColor = row.term==='short'?'#dc2626':row.term==='mid'?'#d97706':'#15803d';
+    const termLabel = row.term==='short'?'短线':row.term==='mid'?'中线':'长线';
+    targetCard = `
+      <div class="sec-head" style="display:flex;justify-content:space-between;align-items:center">
+        <span>买入参考价 · ${row.horizon||''}</span>
+        <span style="font-size:10px;color:${termColor};font-weight:700;padding:1px 6px;border:1px solid ${termColor};border-radius:3px">${termLabel}</span>
+      </div>
+      <div class="stat-grid" style="grid-template-columns:1fr 1fr 1fr;gap:5px">
+        <div class="stat-card"><div class="stat-lbl">止损位</div>
+          <div class="stat-val r" style="font-size:18px">$${stop}</div>
+          <div style="font-size:11px;color:var(--red);font-weight:600;margin-top:2px">-${row.downside_pct}%</div></div>
+        <div class="stat-card"><div class="stat-lbl">当前价</div>
+          <div class="stat-val" style="font-size:18px">$${price}</div>
+          <div style="font-size:11px;color:var(--text3);font-weight:600;margin-top:2px">入场价</div></div>
+        <div class="stat-card"><div class="stat-lbl">目标价</div>
+          <div class="stat-val g" style="font-size:18px">$${target}</div>
+          <div style="font-size:11px;color:var(--green);font-weight:600;margin-top:2px">+${row.upside_pct}%</div></div>
+      </div>
+      <div class="tgt-bar">
+        <div class="tgt-bar-stop" style="width:${stopToPrice}%"></div>
+        <div class="tgt-bar-now" style="width:2px"></div>
+        <div class="tgt-bar-target" style="width:${priceToTarget}%"></div>
+      </div>
+      <div style="font-size:11px;color:var(--text3);margin-top:6px;display:flex;justify-content:space-between">
+        <span>风险回报比 <strong style="color:var(--accent)">${row.risk_reward}:1</strong></span>
+        <span>ATR(14) 倍数法</span>
+      </div>`;
+  }
+
   // strategy-specific stat cards
   let stratCards='';
   if(strategy==='momentum'||strategy==='momentum_quality'){
@@ -1312,6 +1384,7 @@ function renderDetail({info,prices}, row) {
       <div class="chart-box"><canvas id="${cid}"></canvas>
         <div class="ld-wrap show" id="cl"><div class="spinner"></div></div></div>
     </div>
+    ${targetCard?`<div>${targetCard}</div>`:''}
     <div>
       <div class="sec-head">${STRAT_META[strategy].desc.split('；')[0].slice(0,20)}…</div>
       <div class="stat-grid">${stratCards}</div>
