@@ -330,6 +330,28 @@ tr.selected td:first-child{border-left:2px solid var(--accent);padding-left:10px
   align-items:center;justify-content:center;border-radius:var(--radius)}
 .ld-wrap.show{display:flex}
 
+.diag-panel{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px 16px;margin:8px 16px 0;display:flex;flex-direction:column;gap:10px;flex-shrink:0}
+.diag-header{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border);padding-bottom:8px}
+.diag-title{font-size:12px;font-weight:800;color:var(--text);text-transform:uppercase;letter-spacing:.04em}
+.diag-toggle{background:none;border:1px solid var(--border);color:var(--text2);font-size:11px;padding:3px 10px;border-radius:5px;cursor:pointer;font-weight:600}
+.diag-toggle:hover{border-color:var(--accent);color:var(--accent)}
+.diag-body{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.diag-section-title{font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center}
+.diag-warn{background:rgba(217,119,6,.08);border:1px solid rgba(217,119,6,.25);border-radius:5px;padding:6px 10px;font-size:11px;color:#92400e;font-weight:600;display:flex;align-items:center;gap:6px}
+.diag-warn-red{background:rgba(220,38,38,.08);border-color:rgba(220,38,38,.25);color:#b91c1c}
+.corr-table{width:100%;border-collapse:collapse;font-size:10px;font-variant-numeric:tabular-nums}
+.corr-table th{padding:3px 4px;font-weight:700;color:var(--text3);font-size:9px;text-align:center}
+.corr-table th.row-label{text-align:left}
+.corr-table td{padding:3px;text-align:center;font-weight:600;border:1px solid var(--surface);min-width:36px}
+.corr-table td.row-label{text-align:left;color:var(--text2);font-weight:700;padding:3px 6px}
+.sec-bar{display:flex;align-items:center;gap:8px;font-size:11px;padding:3px 0}
+.sec-bar-name{min-width:90px;color:var(--text2);font-weight:600}
+.sec-bar-track{flex:1;height:10px;background:var(--surface2);border:1px solid var(--border);border-radius:3px;overflow:hidden}
+.sec-bar-fill{height:100%;background:var(--accent);border-radius:3px}
+.sec-bar-fill.concentrated{background:var(--red)}
+.sec-bar-fill.mod{background:var(--amber)}
+.sec-bar-val{min-width:48px;text-align:right;font-weight:700;font-variant-numeric:tabular-nums;color:var(--text2)}
+@media(max-width:900px){.diag-body{grid-template-columns:1fr}}
 .heatmap-wrap{position:relative}
 .heatmap-table{border-collapse:separate;border-spacing:0;font-size:11px;white-space:nowrap}
 .heatmap-table th{position:sticky;top:0;background:var(--surface);padding:6px 6px;text-align:center;border-bottom:2px solid var(--border);font-size:10px;font-weight:700;color:var(--text2);min-width:68px;z-index:5}
@@ -504,6 +526,7 @@ tr.selected td:first-child{border-left:2px solid var(--accent);padding-left:10px
       <div class="status-dot" id="statusDot"></div>
       <span id="statusText">就绪 — 选择策略后点击「开始计算」</span>
     </div>
+    <div id="diagPanel" style="display:none"></div>
     <div id="tableWrap" style="display:flex;flex-direction:column;flex:1">
       <div class="empty-state">
         <div class="icon">📊</div>
@@ -551,42 +574,42 @@ const STRAT_META = {
   momentum: {
     desc: "月度收益率算术均值，捕捉持续上涨趋势；适合趋势明确的牛市行情",
     sortKey: "mom_mean", sortAsc: false,
-    cols: ["rank","ticker","sector","price","mom_mean","total_ret","sharpe","max_dd","short_float","inst_hold","target","stop","risk_reward","horizon"],
+    cols: ["rank","ticker","sector","price","mom_mean","total_ret","sharpe","max_dd","short_float","inst_hold","target","stop","risk_reward","horizon","earnings_date"],
   },
   momentum_quality: {
     desc: "动量(50%) + ROE(30%) + 净利润率(20%) 综合打分，过滤基本面差的动量股",
     sortKey: "composite", sortAsc: false,
-    cols: ["rank","ticker","sector","price","composite","mom_mean","roe","profit_margin","max_dd","short_float","inst_hold","target","stop","risk_reward","horizon"],
+    cols: ["rank","ticker","sector","price","composite","mom_mean","roe","profit_margin","max_dd","short_float","inst_hold","target","stop","risk_reward","horizon","earnings_date"],
   },
   low_vol: {
     desc: "以 Beta 和年化波动率升序排列，优先低风险品种；适合震荡市或防御配置",
     sortKey: "beta", sortAsc: true,
-    cols: ["rank","ticker","sector","price","beta","ann_vol","total_ret","mom_mean","max_dd","target","stop","risk_reward","horizon"],
+    cols: ["rank","ticker","sector","price","beta","ann_vol","total_ret","mom_mean","max_dd","target","stop","risk_reward","horizon","earnings_date"],
   },
   piotroski: {
     desc: "Piotroski F-Score：9项财务健康指标（盈利/杠杆/效率各3项），满分9分",
     sortKey: "fscore", sortAsc: false,
-    cols: ["rank","ticker","sector","price","fscore","f_profit","f_leverage","f_efficiency","roa","gross_margin","target","stop","risk_reward","horizon"],
+    cols: ["rank","ticker","sector","price","fscore","f_profit","f_leverage","f_efficiency","roa","gross_margin","target","stop","risk_reward","horizon","earnings_date"],
   },
   dual_momentum: {
     desc: "两层过滤：① 绝对动量 — 总收益 > 3M国债收益率，不过线的排到末尾；② 剩余按相对动量排序",
     sortKey: "mom_mean", sortAsc: false,
-    cols: ["rank","ticker","sector","price","abs_pass","mom_mean","rf_hurdle","total_ret","sharpe","max_dd","target","stop","risk_reward","horizon"],
+    cols: ["rank","ticker","sector","price","abs_pass","mom_mean","rf_hurdle","total_ret","sharpe","max_dd","target","stop","risk_reward","horizon","earnings_date"],
   },
   multifactor: {
     desc: "多因子 Z-Score 合成：动量35% + ROE25% + 净利润率15% + 低Beta15% + 低PS10%",
     sortKey: "mf_score", sortAsc: false,
-    cols: ["rank","ticker","sector","price","mf_score","mom_mean","roe","profit_margin","beta","ps","short_float","inst_hold","target","stop","risk_reward","horizon"],
+    cols: ["rank","ticker","sector","price","mf_score","mom_mean","roe","profit_margin","beta","ps","short_float","inst_hold","target","stop","risk_reward","horizon","earnings_date"],
   },
   high52w: {
     desc: "George & Hwang 2004（JoF）：距52周高点越近的股票未来半年至一年持续走强；双重过滤=200日均线之上+正向月动量",
     sortKey: "dist_high", sortAsc: false,
-    cols: ["rank","ticker","sector","price","dist_high","passed","high_52w","from_low","above_ma200","mom_mean","target","stop","risk_reward","horizon"],
+    cols: ["rank","ticker","sector","price","dist_high","passed","high_52w","from_low","above_ma200","mom_mean","target","stop","risk_reward","horizon","earnings_date"],
   },
   connors_rsi: {
     desc: "Larry Connors 短线 mean reversion：200日均线之上+RSI(2)<5 极度超卖→反弹至5日均线之上卖出；持有 2-5 天",
     sortKey: "rsi2", sortAsc: true,
-    cols: ["rank","ticker","sector","price","signal","rsi2","rsi14","from_ma200","ma5","above_ma200","target","stop","risk_reward","horizon"],
+    cols: ["rank","ticker","sector","price","signal","rsi2","rsi14","from_ma200","ma5","above_ma200","target","stop","risk_reward","horizon","earnings_date"],
   },
 };
 
@@ -686,6 +709,14 @@ const COL_DEF = {
     return `<span class="rr-badge ${cls}">${v}:1</span>`;
   }},
   horizon:      { label:'持有期',       fmt:(v)=>v?`<span class="num" style="color:var(--text2);font-size:11px">${v}</span>`:'—' },
+  earnings_date:{ label:'下次财报',     fmt:(v,r)=>{
+    if(!v) return '<span class="neu">—</span>';
+    const d = r.days_to_earnings;
+    if(d==null) return `<span class="num neu">${v}</span>`;
+    const danger = d<14 ? 'neg' : d<30 ? 'a' : 'neu';
+    const wt = d<14 ? '700' : '500';
+    return `<div class="tgt-cell"><span class="v ${danger}" style="font-weight:${wt}">${v}</span><span class="pct ${danger}">${d>=0?d:0} 天后</span></div>`;
+  }},
 };
 
 function fPips(v, total) {
@@ -1086,6 +1117,100 @@ function onUniverseChange(){ loadSectors(document.getElementById('universe').val
 loadSectors('nasdaq100');
 
 // ── SSE ───────────────────────────────────────────────────────────────────────
+// ── top-10 diagnostics ────────────────────────────────────────────────────────
+let _diagCollapsed = false;
+function corrColor(v) {
+  if (v == null) return 'background:var(--surface2);color:var(--text3)';
+  const abs = Math.abs(v);
+  const intensity = Math.min(abs / 0.9, 1);
+  const a = (0.1 + intensity * 0.65).toFixed(2);
+  if (v > 0) return `background:rgba(220,38,38,${a});color:${abs>0.6?'#fff':'#b91c1c'};font-weight:700`;
+  return `background:rgba(22,163,74,${a});color:${abs>0.6?'#fff':'#15803d'};font-weight:700`;
+}
+
+function renderDiagnostics(d) {
+  const panel = document.getElementById('diagPanel');
+  if (!d) { panel.style.display='none'; return; }
+  panel.style.display='block';
+
+  const tickers = d.tickers;
+  const mtx = d.matrix;
+
+  let corrHtml = '<table class="corr-table"><thead><tr><th class="row-label"></th>';
+  tickers.forEach(t => corrHtml += `<th>${esc(t)}</th>`);
+  corrHtml += '</tr></thead><tbody>';
+  for (let i = 0; i < tickers.length; i++) {
+    corrHtml += `<tr><td class="row-label">${esc(tickers[i])}</td>`;
+    for (let j = 0; j < tickers.length; j++) {
+      const v = mtx[i][j];
+      if (i === j) {
+        corrHtml += '<td style="background:var(--surface2);color:var(--text3)">—</td>';
+      } else {
+        corrHtml += `<td style="${corrColor(v)}" title="${esc(tickers[i])} vs ${esc(tickers[j])}: ${v??'—'}">${v??'—'}</td>`;
+      }
+    }
+    corrHtml += '</tr>';
+  }
+  corrHtml += '</tbody></table>';
+
+  let secHtml = '';
+  d.sector_bars.forEach(sb => {
+    const cls = sb.count >= 5 ? 'concentrated' : sb.count >= 3 ? 'mod' : '';
+    secHtml += `<div class="sec-bar">
+      <span class="sec-bar-name" title="${esc(sb.sector)}">${esc(sb.sector)}</span>
+      <div class="sec-bar-track"><div class="sec-bar-fill ${cls}" style="width:${sb.pct}%"></div></div>
+      <span class="sec-bar-val">${sb.count}/10</span>
+    </div>`;
+  });
+
+  const avgCorrColor = d.avg_corr == null ? 'var(--text3)'
+    : d.avg_corr > 0.7 ? 'var(--red)' : d.avg_corr > 0.5 ? 'var(--amber)' : 'var(--green)';
+
+  let warnHtml = '';
+  (d.warnings || []).forEach(w => {
+    const red = w.includes('过度集中') || w.includes('高度同向');
+    warnHtml += `<div class="diag-warn ${red?'diag-warn-red':''}">${esc(w)}</div>`;
+  });
+
+  panel.innerHTML = `
+    <div class="diag-panel">
+      <div class="diag-header">
+        <span class="diag-title">前10诊断 · 集中度 & 相关性</span>
+        <button class="diag-toggle" onclick="toggleDiag()">${_diagCollapsed?'展开 ▼':'收起 ▲'}</button>
+      </div>
+      ${_diagCollapsed?'':`
+        ${warnHtml ? `<div style="display:flex;flex-direction:column;gap:5px">${warnHtml}</div>`:''}
+        <div class="diag-body">
+          <div>
+            <div class="diag-section-title">
+              <span>60日相关性矩阵</span>
+              <span style="color:${avgCorrColor};font-weight:700">平均 ${d.avg_corr ?? '—'}</span>
+            </div>
+            ${corrHtml}
+            <div style="font-size:10px;color:var(--text3);margin-top:6px">
+              <span style="color:var(--red);font-weight:700">红</span>=正相关（同涨同跌）·
+              <span style="color:var(--green);font-weight:700">绿</span>=负相关（对冲）
+            </div>
+          </div>
+          <div>
+            <div class="diag-section-title"><span>板块分布</span></div>
+            ${secHtml}
+            <div style="font-size:10px;color:var(--text3);margin-top:6px">
+              单板块占 5/10 以上视为过度集中
+            </div>
+          </div>
+        </div>
+      `}
+    </div>`;
+}
+
+function toggleDiag() {
+  _diagCollapsed = !_diagCollapsed;
+  if (_lastDiag) renderDiagnostics(_lastDiag);
+}
+
+let _lastDiag = null;
+
 function connectSSE() {
   if(evtSource) evtSource.close();
   evtSource = new EventSource('/events');
@@ -1097,6 +1222,8 @@ function connectSSE() {
       const d=JSON.parse(e.data);
       currentRange={start:d.start,end:d.end};
       allRows=d.rows;
+      _lastDiag = d.diagnostics || null;
+      renderDiagnostics(_lastDiag);
       const sm = STRAT_META[d.strategy] || STRAT_META[strategy] || STRAT_META['momentum'];
       sortCol = sm.sortKey;
       sortAsc = sm.sortAsc ?? false;

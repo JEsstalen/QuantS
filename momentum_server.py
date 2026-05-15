@@ -1187,8 +1187,64 @@ def _atr(prices, ticker, n=14):
     if pd.isna(atr) or atr <= 0: return None
     return float(atr)
 
+# ─── 财报日期（事件风险）─────────────────────────────────────────────────────
+
+_earnings_cache: dict = {}     # ticker -> (ts, date_str|None)
+_EARNINGS_TTL = 6 * 3600       # 6 小时缓存
+
+def _fetch_earnings(ticker):
+    """返回 (ticker, 'YYYY-MM-DD' 或 None)"""
+    import time as _t
+    entry = _earnings_cache.get(ticker)
+    if entry and _t.time() - entry[0] < _EARNINGS_TTL:
+        return ticker, entry[1]
+    try:
+        import yfinance as yf, pandas as pd
+        result = [None]
+        def _do():
+            try:
+                t = yf.Ticker(ticker)
+                cal = t.calendar
+                if isinstance(cal, dict):
+                    ed = cal.get("Earnings Date")
+                    if isinstance(ed, list) and ed:
+                        result[0] = ed[0]
+                    elif ed is not None:
+                        result[0] = ed
+            except: pass
+        import threading as _th
+        th = _th.Thread(target=_do, daemon=True)
+        th.start(); th.join(timeout=6)
+        date_str = None
+        if result[0] is not None:
+            try:
+                dt = pd.to_datetime(result[0])
+                date_str = dt.strftime("%Y-%m-%d")
+            except: pass
+        _earnings_cache[ticker] = (_t.time(), date_str)
+        return ticker, date_str
+    except:
+        _earnings_cache[ticker] = (_t.time(), None)
+        return ticker, None
+
+def _parallel_earnings(tickers, pct_start, pct_end, workers=10):
+    results = {}
+    done = [0]; total = len(tickers)
+    if total == 0: return results
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {ex.submit(_fetch_earnings, t): t for t in tickers}
+        for f in as_completed(futs):
+            done[0] += 1
+            pct = pct_start + int(done[0] / total * (pct_end - pct_start))
+            log(f"财报日期 {done[0]}/{total}…", pct)
+            try:
+                t, d = f.result()
+                results[t] = d
+            except: pass
+    return results
+
 def _add_targets(df, prices, strategy):
-    """给前10名计算目标价 / 止损 / 风险回报比"""
+    """给前10名计算目标价 / 止损 / 风险回报比 / 财报日期"""
     import pandas as pd, numpy as np
     if df.empty: return df
     term, stop_mult, target_mult, horizon, basis = _TERM_MAP.get(
@@ -1201,7 +1257,14 @@ def _add_targets(df, prices, strategy):
     df["risk_reward"] = None
     df["upside_pct"]  = None
     df["downside_pct"]= None
+    df["earnings_date"] = None
+    df["days_to_earnings"] = None
 
+    top10_tickers = df.head(10)["ticker"].tolist()
+    # 并行拉前10名财报日期
+    earnings_map = _parallel_earnings(top10_tickers, 96, 99, workers=10)
+
+    today_dt = pd.Timestamp.today().normalize()
     for i in df.head(10).index:
         ticker = df.at[i, "ticker"]
         if ticker not in prices.columns: continue
@@ -1229,7 +1292,73 @@ def _add_targets(df, prices, strategy):
         df.at[i, "upside_pct"]   = round(float(upside),       2)
         df.at[i, "downside_pct"] = round(float(downside),     2)
         df.at[i, "risk_reward"]  = round(float(rr),           2)
+
+        # 财报日期 + 距今天数
+        ed = earnings_map.get(ticker)
+        if ed:
+            try:
+                ed_dt = pd.to_datetime(ed).normalize()
+                days = int((ed_dt - today_dt).days)
+                df.at[i, "earnings_date"]    = ed
+                df.at[i, "days_to_earnings"] = days
+            except: pass
     return df
+
+# ─── 前10诊断：相关性 + 板块占比 ──────────────────────────────────────────────
+
+def _diagnose_top10(df, prices):
+    """计算前10名 60日相关性、板块占比、平均相关性"""
+    import pandas as pd, numpy as np
+    top = df.head(10)
+    if top.empty: return None
+    tickers = [t for t in top["ticker"].tolist() if t in prices.columns]
+    if len(tickers) < 2: return None
+
+    # 60日相关性矩阵
+    daily = prices[tickers].pct_change().dropna(how="all").tail(60)
+    if len(daily) < 10: return None
+    corr = daily.corr()
+
+    matrix = []
+    for i, ta in enumerate(tickers):
+        row = []
+        for tb in tickers:
+            v = corr.loc[ta, tb]
+            row.append(round(float(v), 2) if not pd.isna(v) else None)
+        matrix.append(row)
+
+    # 平均相关性（去对角线）
+    n = len(tickers)
+    sum_off = sum(matrix[i][j] for i in range(n) for j in range(n) if i != j and matrix[i][j] is not None)
+    cnt_off = sum(1 for i in range(n) for j in range(n) if i != j and matrix[i][j] is not None)
+    avg_corr = round(sum_off / cnt_off, 3) if cnt_off else None
+
+    # 板块占比
+    sectors = {}
+    for sec in top["sector"].tolist():
+        if not sec or pd.isna(sec): sec = "未知"
+        sec = str(sec)
+        sectors[sec] = sectors.get(sec, 0) + 1
+    sector_bars = [{"sector": s, "count": c, "pct": round(c/len(top)*100, 0)}
+                   for s, c in sorted(sectors.items(), key=lambda x: -x[1])]
+
+    # 集中度警告
+    max_sec = sector_bars[0] if sector_bars else None
+    warnings_list = []
+    if max_sec and max_sec["count"] >= 5:
+        warnings_list.append(f"⚠ {max_sec['sector']} 占 {max_sec['count']}/10，板块过度集中")
+    if avg_corr is not None and avg_corr > 0.7:
+        warnings_list.append(f"⚠ 平均相关性 {avg_corr}，10只走势高度同向，分散效果弱")
+    elif avg_corr is not None and avg_corr > 0.5:
+        warnings_list.append(f"近60日平均相关性 {avg_corr}，分散效果一般")
+
+    return {
+        "tickers":      tickers,
+        "matrix":       matrix,
+        "avg_corr":     avg_corr,
+        "sector_bars":  sector_bars,
+        "warnings":     warnings_list,
+    }
 
 # ─── 详情接口 ─────────────────────────────────────────────────────────────────
 
@@ -1283,8 +1412,10 @@ def api_run():
             fn = STRATEGIES.get(strategy, calc_momentum)
             df = fn(prices, meta, start_str, end_str)
             df = _add_targets(df, prices, strategy)
+            diagnostics = _diagnose_top10(df, prices)
             rows = df.head(100).to_dict(orient="records")
-            _broadcast("done", {"rows": rows, "start": start_str, "end": end_str, "strategy": strategy})
+            _broadcast("done", {"rows": rows, "start": start_str, "end": end_str,
+                                "strategy": strategy, "diagnostics": diagnostics})
         except Exception as e:
             _broadcast("error", {"msg": str(e)})
 
