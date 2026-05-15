@@ -909,48 +909,119 @@ _SECTOR_ETFS = [
     ("XLC",  "通信服务"),
 ]
 
+# ─── 细分概念 ETF（24个热门主题，按市场关注度排序）────────────────────────────
+_THEME_ETFS = [
+    ("SMH",  "半导体"),
+    ("SOXX", "半导体(iShares)"),
+    ("ARKK", "颠覆创新(ARK)"),
+    ("QQQM", "纳斯达克100"),
+    ("BOTZ", "机器人AI"),
+    ("ROBO", "机器人自动化"),
+    ("HACK", "网络安全"),
+    ("CIBR", "网络安全(First Trust)"),
+    ("CLOU", "云计算"),
+    ("FINX", "金融科技"),
+    ("IBB",  "生物科技"),
+    ("XBI",  "生物科技(SPDR)"),
+    ("ITA",  "国防航天"),
+    ("XAR",  "航空航天"),
+    ("ICLN", "清洁能源"),
+    ("TAN",  "太阳能"),
+    ("LIT",  "锂电池"),
+    ("URA",  "铀矿核能"),
+    ("KWEB", "中概互联"),
+    ("FXI",  "中国大盘"),
+    ("EWJ",  "日本股市"),
+    ("INDA", "印度"),
+    ("GDX",  "黄金矿"),
+    ("KRE",  "区域银行"),
+    ("IBIT", "比特币ETF"),
+    ("JETS", "航空"),
+    ("GAMR", "游戏电竞"),
+    ("CARS", "电动车"),
+]
+
 _sector_heatmap_cache = {"ts": 0, "data": None}
+_theme_heatmap_cache  = {"ts": 0, "data": None}
 _SECTOR_TTL = 3600
+
+def _phase_label(returns):
+    """根据近5日/近10日/近20日加速度判断热度阶段"""
+    import numpy as np
+    if len(returns) < 21: return None, None
+    arr = [r for r in returns if r is not None]
+    if len(arr) < 21: return None, None
+    last5  = sum(returns[-5:])
+    prev5  = sum(returns[-10:-5])
+    last10 = sum(returns[-10:])
+    last20 = sum(returns[-20:])
+    # 加速度: 近5日 - 前5日
+    accel = round(last5 - prev5, 2)
+    # 阶段判定
+    if last5 > 0 and last5 > prev5 and last20 > 0:
+        phase = "accel_up"      # 加速上涨
+    elif last5 > 0 and prev5 < 0:
+        phase = "reversal_up"   # 反转向上
+    elif last5 < 0 and last20 > 0:
+        phase = "topping"       # 见顶回落
+    elif last5 < 0 and last5 < prev5 and last20 < 0:
+        phase = "accel_dn"      # 加速下跌
+    elif last5 > 0 and prev5 > 0 and last5 < prev5:
+        phase = "cooling"       # 涨势减速
+    elif last5 < 0 and prev5 < 0 and last5 > prev5:
+        phase = "stabilizing"   # 跌势减缓
+    else:
+        phase = "neutral"
+    return phase, accel
+
+def _compute_heatmap(etf_list):
+    """通用热力计算：返回 {sectors:[...], dates:[...]}"""
+    import yfinance as yf, pandas as pd, numpy as np
+    today = pd.Timestamp.today()
+    start = (today - pd.DateOffset(days=90)).strftime("%Y-%m-%d")
+    tickers = [e[0] for e in etf_list]
+    raw = yf.download(tickers, start=start, auto_adjust=True, progress=False)
+    close = raw["Close"] if "Close" in raw.columns else raw
+    if hasattr(close,"ndim") and close.ndim==1: close=close.to_frame(name=tickers[0])
+    close = close.dropna(how="all")
+
+    ret = close.pct_change().dropna(how="all") * 100
+    ret = ret.tail(60)
+    dates = [str(d.date()) for d in ret.index]
+
+    result = []
+    for ticker, name in etf_list:
+        if ticker not in ret.columns: continue
+        s = ret[ticker]
+        vals = [round(float(v),2) if not np.isnan(v) else None for v in s]
+        c5  = round(float((close[ticker].iloc[-1]/close[ticker].iloc[-6 ]-1)*100),2) if len(close)>=6  else None
+        c20 = round(float((close[ticker].iloc[-1]/close[ticker].iloc[-21]-1)*100),2) if len(close)>=21 else None
+        c60 = round(float((close[ticker].iloc[-1]/close[ticker].iloc[-61]-1)*100),2) if len(close)>=61 else None
+        phase, accel = _phase_label(vals)
+        result.append({
+            "ticker": ticker, "name": name,
+            "dates": dates, "returns": vals,
+            "cum5": c5, "cum20": c20, "cum60": c60,
+            "phase": phase, "accel": accel,
+        })
+
+    # 按近5日收益降序，让热度高的排在前面
+    result.sort(key=lambda x: x.get("cum5") or -999, reverse=True)
+    return {"sectors": result, "dates": dates}
 
 @app.route("/api/sectors/heatmap")
 def api_sector_heatmap():
-    import time, yfinance as yf, pandas as pd, numpy as np
+    import time
+    kind = request.args.get("kind", "sectors")
+    cache = _theme_heatmap_cache if kind == "themes" else _sector_heatmap_cache
+    etf_list = _THEME_ETFS if kind == "themes" else _SECTOR_ETFS
     now = time.time()
-    if now - _sector_heatmap_cache["ts"] < _SECTOR_TTL and _sector_heatmap_cache["data"]:
-        return jsonify(_sector_heatmap_cache["data"])
+    if now - cache["ts"] < _SECTOR_TTL and cache["data"]:
+        return jsonify(cache["data"])
     try:
-        today = pd.Timestamp.today()
-        start = (today - pd.DateOffset(days=90)).strftime("%Y-%m-%d")  # 多拉30天保证有60交易日
-        tickers = [e[0] for e in _SECTOR_ETFS]
-        raw = yf.download(tickers, start=start, auto_adjust=True, progress=False)
-        close = raw["Close"] if "Close" in raw.columns else raw
-        if hasattr(close,"ndim") and close.ndim==1: close=close.to_frame(name=tickers[0])
-        close = close.dropna(how="all")
-
-        # 日涨跌幅 %
-        ret = close.pct_change().dropna(how="all") * 100
-        # 最近60个交易日
-        ret = ret.tail(60)
-        dates = [str(d.date()) for d in ret.index]
-
-        result = []
-        for ticker, name in _SECTOR_ETFS:
-            if ticker not in ret.columns: continue
-            s = ret[ticker]
-            vals = [round(float(v),2) if not np.isnan(v) else None for v in s]
-            # 近5日/20日/60日累计收益（用于趋势判断）
-            c5  = round(float((close[ticker].iloc[-1]/close[ticker].iloc[-6 ]-1)*100),2) if len(close)>=6  else None
-            c20 = round(float((close[ticker].iloc[-1]/close[ticker].iloc[-21]-1)*100),2) if len(close)>=21 else None
-            c60 = round(float((close[ticker].iloc[-1]/close[ticker].iloc[-61]-1)*100),2) if len(close)>=61 else None
-            result.append({
-                "ticker": ticker, "name": name,
-                "dates": dates, "returns": vals,
-                "cum5": c5, "cum20": c20, "cum60": c60,
-            })
-
-        data = {"sectors": result, "dates": dates}
-        _sector_heatmap_cache["ts"] = now
-        _sector_heatmap_cache["data"] = data
+        data = _compute_heatmap(etf_list)
+        cache["ts"] = now
+        cache["data"] = data
         return jsonify(data)
     except Exception as e:
         return jsonify({"error": str(e)}), 500

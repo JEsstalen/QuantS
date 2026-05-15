@@ -316,14 +316,29 @@ tr.selected td:first-child{border-left:2px solid var(--accent);padding-left:10px
   align-items:center;justify-content:center;border-radius:var(--radius)}
 .ld-wrap.show{display:flex}
 
-.heatmap-table{border-collapse:collapse;font-size:11px;white-space:nowrap}
-.heatmap-table th{position:sticky;top:0;background:var(--surface);padding:5px 4px;text-align:center;border-bottom:2px solid var(--border);font-size:10px;font-weight:700;color:var(--text2);min-width:64px;z-index:2}
-.heatmap-table td.date-col{position:sticky;left:0;background:var(--surface);z-index:1;min-width:46px;font-size:10px;color:var(--text3);padding:2px 6px;border-right:1px solid var(--border)}
-.heatmap-table th.date-col{z-index:3;text-align:left}
-.heat-cell{padding:2px 3px;text-align:center;font-size:10px;font-weight:600;font-variant-numeric:tabular-nums;cursor:default}
-.heat-cell:hover{outline:2px solid rgba(0,0,0,.3);outline-offset:-1px;z-index:1;position:relative}
-.sec-ticker{font-size:9px;font-weight:400;color:var(--text3);display:block}
-.trend-row td{border-top:2px solid var(--border);font-size:11px;font-weight:700}
+.heatmap-wrap{position:relative}
+.heatmap-table{border-collapse:separate;border-spacing:0;font-size:11px;white-space:nowrap}
+.heatmap-table th{position:sticky;top:0;background:var(--surface);padding:6px 6px;text-align:center;border-bottom:2px solid var(--border);font-size:10px;font-weight:700;color:var(--text2);min-width:68px;z-index:5}
+.heatmap-table td.date-col{position:sticky;left:0;background:var(--surface);z-index:2;min-width:52px;font-size:10px;color:var(--text3);padding:3px 8px;border-right:1px solid var(--border)}
+.heatmap-table th.date-col{z-index:6;text-align:left;background:var(--surface)}
+.heat-cell{padding:3px 4px;text-align:center;font-size:10px;font-weight:600;font-variant-numeric:tabular-nums;cursor:default;border-bottom:1px solid rgba(0,0,0,.02)}
+.heat-cell:hover{outline:2px solid rgba(0,0,0,.35);outline-offset:-1px;z-index:1;position:relative}
+.sec-ticker{font-size:9px;font-weight:400;color:var(--text3);display:block;margin-top:1px}
+.trend-row td.heat-cell,.phase-row td{border-top:1px solid var(--border);font-size:11px;font-weight:700}
+.phase-row td{background:var(--surface);font-size:11px;text-align:center;padding:5px 4px;border-bottom:2px solid var(--border)}
+.phase-row td.date-col{background:var(--surface);font-weight:700;color:var(--text)}
+.phase-badge{display:inline-block;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:700;line-height:1.2;letter-spacing:.02em}
+.pb-accel-up   {background:rgba(22,163,74,.18);color:#15803d}
+.pb-reversal-up{background:rgba(22,163,74,.10);color:#16a34a;border:1px dashed #16a34a}
+.pb-cooling    {background:rgba(217,119,6,.12);color:#b45309}
+.pb-topping    {background:rgba(217,119,6,.18);color:#9a3412;border:1px dashed #d97706}
+.pb-accel-dn   {background:rgba(220,38,38,.18);color:#b91c1c}
+.pb-stabilizing{background:rgba(220,38,38,.08);color:#7f1d1d;border:1px dashed #dc2626}
+.pb-neutral    {background:var(--surface2);color:var(--text3)}
+.heatmap-toolbar{display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap}
+.kind-tabs{display:flex;gap:0;background:var(--surface2);border-radius:6px;padding:2px;border:1px solid var(--border)}
+.kind-tabs button{height:26px;padding:0 14px;border:none;background:transparent;color:var(--text2);font-size:12px;font-weight:600;cursor:pointer;border-radius:4px}
+.kind-tabs button.active{background:var(--accent);color:#fff}
 ::-webkit-scrollbar{width:5px;height:5px}
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
@@ -1390,7 +1405,6 @@ function setStatus(state,msg){
 function setProgress(p){document.getElementById('progressBar').style.width=p+'%';}
 // ── sector heatmap ───────────────────────────────────────────────────────────
 let sectorsLoaded = false;
-let _sectorCache = null;
 
 function heatBg(val) {
   if (val == null) return 'var(--surface2)';
@@ -1411,68 +1425,114 @@ function renderSectorHeatmap(data) {
   const { sectors, dates } = data;
   const wrap = document.getElementById('sectorHeatmapWrap');
 
-  let h = '<div style="margin-bottom:10px;display:flex;align-items:center;gap:16px;font-size:11px;color:var(--text2)">';
-  h += '<span style="font-weight:700">板块热力图 · 近60交易日日收益率</span>';
-  h += '<span style="color:var(--text3)">颜色深度代表涨跌幅大小（饱和点 ±2.5%）· hover 查看精确值</span>';
+  // dates 倒序：最新在最上
+  const datesRev = dates.slice().reverse();
+
+  // phase label map
+  const PHASE = {
+    accel_up:    {cls:'pb-accel-up',    txt:'加速↑'},
+    reversal_up: {cls:'pb-reversal-up', txt:'反转↑'},
+    cooling:     {cls:'pb-cooling',     txt:'减速'},
+    topping:     {cls:'pb-topping',     txt:'见顶↓'},
+    accel_dn:    {cls:'pb-accel-dn',    txt:'加速↓'},
+    stabilizing: {cls:'pb-stabilizing', txt:'企稳'},
+    neutral:     {cls:'pb-neutral',     txt:'—'},
+  };
+
+  let h = '<div class="heatmap-toolbar">';
+  h += `<span style="font-weight:700;font-size:12px">${currentHeatmapKind==='themes'?'细分概念':'板块'}热力图 · 近60交易日</span>`;
+  h += '<div class="kind-tabs">';
+  h += `<button class="${currentHeatmapKind==='sectors'?'active':''}" onclick="switchHeatmapKind('sectors')">11大板块</button>`;
+  h += `<button class="${currentHeatmapKind==='themes'?'active':''}" onclick="switchHeatmapKind('themes')">细分概念</button>`;
+  h += '</div>';
+  h += '<span style="color:var(--text3);font-size:11px">按近5日收益排序 · 颜色饱和点±2.5% · hover查看精确值</span>';
   h += '</div>';
 
-  h += '<div style="overflow:auto"><table class="heatmap-table"><thead><tr>';
+  h += '<div class="heatmap-wrap" style="overflow:auto;max-height:calc(100vh - 220px)">';
+  h += '<table class="heatmap-table"><thead><tr>';
   h += '<th class="date-col">日期</th>';
   sectors.forEach(s => { h += `<th>${s.name}<span class="sec-ticker">${s.ticker}</span></th>`; });
   h += '</tr></thead><tbody>';
 
-  // trend summary rows (近5日 / 近20日 / 近60日)
-  [['近5日', 'cum5', 1], ['近20日', 'cum20', 1], ['近60日', 'cum60', 1]].forEach(([label, key, dec]) => {
+  // phase row（首先显示，最直观）
+  h += '<tr class="phase-row"><td class="date-col">热度阶段</td>';
+  sectors.forEach(s => {
+    const p = PHASE[s.phase] || PHASE.neutral;
+    const acc = s.accel != null ? `<div style="font-size:9px;color:var(--text3);font-weight:400;margin-top:2px">Δ${s.accel>0?'+':''}${s.accel}</div>` : '';
+    h += `<td title="近5日动能减去前5日动能">
+      <span class="phase-badge ${p.cls}">${p.txt}</span>
+      ${acc}
+    </td>`;
+  });
+  h += '</tr>';
+
+  // trend summary rows
+  [['近5日','cum5',1],['近20日','cum20',1],['近60日','cum60',1]].forEach(([label,key,dec])=>{
     h += `<tr class="trend-row"><td class="date-col" style="color:var(--text);font-weight:700">${label}</td>`;
-    sectors.forEach(s => {
+    sectors.forEach(s=>{
       const v = s[key];
-      h += `<td class="heat-cell" style="background:${heatBg(v)};color:${heatFg(v)}">${heatFmt(v, dec)}</td>`;
+      h += `<td class="heat-cell" style="background:${heatBg(v)};color:${heatFg(v)}">${heatFmt(v,dec)}</td>`;
     });
     h += '</tr>';
   });
 
-  // divider
-  h += `<tr><td colspan="${sectors.length + 1}" style="height:5px;background:var(--surface2);padding:0"></td></tr>`;
+  // 分隔
+  h += `<tr><td colspan="${sectors.length+1}" style="height:5px;background:var(--surface2);padding:0;border:none"></td></tr>`;
 
-  // daily rows oldest→newest (newest at bottom; view auto-scrolls)
-  dates.forEach((date, di) => {
-    h += `<tr><td class="date-col">${date.slice(5)}</td>`;
+  // daily rows: 最新在最上（dates 倒序）
+  datesRev.forEach((date, ri) => {
+    const di = dates.length - 1 - ri;  // 反推原始 index
+    const isLatest = ri === 0;
+    h += `<tr><td class="date-col" ${isLatest?'style="color:var(--accent);font-weight:700"':''}>${date.slice(5)}${isLatest?' ●':''}</td>`;
     sectors.forEach(s => {
       const v = s.returns[di];
-      const title = `${date}  ${s.name}: ${heatFmt(v, 2)}`;
-      h += `<td class="heat-cell" style="background:${heatBg(v)};color:${heatFg(v)}" title="${title}">${heatFmt(v, 2)}</td>`;
+      const title = `${date}  ${s.name}: ${heatFmt(v,2)}`;
+      h += `<td class="heat-cell" style="background:${heatBg(v)};color:${heatFg(v)}" title="${title}">${heatFmt(v,2)}</td>`;
     });
     h += '</tr>';
   });
 
   h += '</tbody></table></div>';
   wrap.innerHTML = h;
-  wrap.scrollTop = wrap.scrollHeight;
+}
+
+let currentHeatmapKind = 'sectors';
+let _heatmapCache = { sectors: null, themes: null };
+
+function switchHeatmapKind(kind) {
+  if (kind === currentHeatmapKind) return;
+  currentHeatmapKind = kind;
+  if (_heatmapCache[kind]) {
+    renderSectorHeatmap(_heatmapCache[kind]);
+  } else {
+    loadSectorHeatmap();
+  }
 }
 
 async function loadSectorHeatmap(force = false) {
   sectorsLoaded = true;
+  const kind = currentHeatmapKind;
   const wrap = document.getElementById('sectorHeatmapWrap');
   const dot  = document.getElementById('sectorDot');
   const stat = document.getElementById('sectorStatus');
 
-  if (!force && _sectorCache) { renderSectorHeatmap(_sectorCache); return; }
+  if (!force && _heatmapCache[kind]) { renderSectorHeatmap(_heatmapCache[kind]); return; }
 
   dot.className = 'status-dot running';
-  stat.textContent = '获取板块数据…';
+  stat.textContent = '获取数据…';
   wrap.innerHTML = '<div class="empty-state"><div class="spinner"></div><p>获取中…</p></div>';
 
   try {
-    const resp = await fetch('/api/sectors/heatmap');
+    const resp = await fetch('/api/sectors/heatmap?kind=' + kind + (force ? '&_=' + Date.now() : ''));
     const data = await resp.json();
     if (data.error) throw new Error(data.error);
-    _sectorCache = data;
+    _heatmapCache[kind] = data;
     renderSectorHeatmap(data);
     dot.className = 'status-dot done';
     const now = new Date();
     document.getElementById('sectorTs').textContent =
       `更新于 ${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}`;
-    stat.textContent = `${data.sectors.length} 个板块 · 近60交易日`;
+    stat.textContent = `${data.sectors.length} 个 · 近60交易日`;
   } catch (e) {
     dot.className = 'status-dot error';
     stat.textContent = '加载失败：' + e.message;
