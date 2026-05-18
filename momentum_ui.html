@@ -1363,14 +1363,96 @@ function _btUpdateUI() {
 }
 
 async function runBacktest() {
+  // 入口：打开窗口显示参数表单，不立即跑
+  openBacktestConfig();
+}
+
+function openBacktestConfig() {
   const btn = document.getElementById('btnBacktest');
   btn.disabled = true;
+  document.getElementById('btModal').classList.add('show');
+  document.getElementById('btTitle').textContent = `回测设置 · 当前策略：${STRAT_META[strategy]?.desc?.slice(0,24) || strategy}`;
+  document.getElementById('btBody').innerHTML = `
+    <div style="padding:6px 4px">
+      <div style="padding:14px 16px;background:var(--surface2);border-radius:6px;display:flex;flex-direction:column;gap:12px">
+        <div style="font-size:12px;font-weight:700;color:var(--text)">回测参数</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:12px">
+          <label style="display:flex;flex-direction:column;gap:4px">
+            <span style="color:var(--text2)">回看窗口</span>
+            <select id="btLookback" style="height:30px;padding:0 8px">
+              <option value="12">12 个月</option>
+              <option value="24" selected>24 个月</option>
+              <option value="36">36 个月</option>
+              <option value="60">60 个月（含 2022 熊市）</option>
+            </select>
+          </label>
+          <label style="display:flex;flex-direction:column;gap:4px">
+            <span style="color:var(--text2)">交易成本（每次换仓双边）</span>
+            <select id="btCost" style="height:30px;padding:0 8px">
+              <option value="0">0 bps（理想化）</option>
+              <option value="5">5 bps（机构）</option>
+              <option value="10" selected>10 bps（散户实盘）</option>
+              <option value="20">20 bps（保守）</option>
+            </select>
+          </label>
+        </div>
+        <label style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--surface);border:1px solid var(--border);border-radius:5px;cursor:pointer">
+          <input type="checkbox" id="btBalance" style="margin:0">
+          <div style="flex:1">
+            <div style="font-size:12px;font-weight:700;color:var(--text)">板块均衡</div>
+            <div style="font-size:11px;color:var(--text3)">开启后每月底每板块最多 2 只，超额跳过</div>
+          </div>
+        </label>
+        <div style="font-size:11px;color:var(--text3);line-height:1.6;padding-top:4px;border-top:1px solid var(--border)">
+          💡 每月100%换仓 = 双边成本 × 12次/年。10 bps 是富途/IB 等券商加 0.05% 滑点的常见水平。<br/>
+          缓存按 (策略, 股票池, 区间, 成本, 均衡) 独立存储，参数不同会重新计算。
+        </div>
+      </div>
+
+      <div style="display:flex;gap:8px;margin-top:14px">
+        <button onclick="startBacktestSingle()" class="btn-run" style="flex:1;justify-content:center;height:38px">
+          ▶ 开始回测（当前策略）
+        </button>
+        <button onclick="runBacktestCompare()" style="flex:1;height:38px;padding:0 14px;border-radius:var(--radius);border:1px solid var(--accent);background:#fff;color:var(--accent);font-weight:700;cursor:pointer;font-size:13px">
+          🆚 对比所有策略
+        </button>
+      </div>
+      <button onclick="closeBacktest()" style="margin-top:8px;width:100%;padding:8px;border-radius:5px;border:1px solid var(--border);background:var(--surface);color:var(--text2);font-size:12px;font-weight:600;cursor:pointer">
+        关闭
+      </button>
+    </div>`;
+  // 恢复上次参数（如有）
+  try {
+    const s = JSON.parse(localStorage.getItem('bt_params_v1') || 'null');
+    if (s) {
+      if (s.lookback) document.getElementById('btLookback').value = s.lookback;
+      if (s.cost) document.getElementById('btCost').value = s.cost;
+      if (s.balance) document.getElementById('btBalance').checked = true;
+    }
+  } catch(_) {}
+}
+
+function _saveBtParams() {
+  try {
+    localStorage.setItem('bt_params_v1', JSON.stringify({
+      lookback: document.getElementById('btLookback')?.value,
+      cost: document.getElementById('btCost')?.value,
+      balance: document.getElementById('btBalance')?.checked,
+    }));
+  } catch(_) {}
+}
+
+async function startBacktestSingle() {
+  _saveBtParams();
   _btRunning = true;
   _btStartTs = Date.now();
   _btLastPct = 0;
   _btLastStep = '初始化…';
 
-  document.getElementById('btModal').classList.add('show');
+  const lookback = parseInt(document.getElementById('btLookback')?.value || 24);
+  const cost     = parseInt(document.getElementById('btCost')?.value || 10);
+  const balance  = document.getElementById('btBalance')?.checked || false;
+
   document.getElementById('btTitle').textContent = `策略回测 · ${STRAT_META[strategy]?.desc?.slice(0,30) || strategy}`;
   document.getElementById('btBody').innerHTML = `
     <div style="padding:10px 4px">
@@ -1379,7 +1461,7 @@ async function runBacktest() {
         <div style="flex:1">
           <div id="btStep" style="font-weight:700;font-size:13px;color:var(--text)">准备中…</div>
           <div style="font-size:11px;color:var(--text3);margin-top:2px">
-            走前向回测：每月底用前6个月数据跑策略 → 选前10等权持有1个月 → 月底换仓
+            参数：回看 ${lookback}月 · 成本 ${cost}bps${balance?' · 板块均衡':''}
           </div>
         </div>
       </div>
@@ -1390,40 +1472,14 @@ async function runBacktest() {
         <span>已用 <b id="btElapsed" style="color:var(--text2)">0s</b></span>
         <span>预计剩余 <b id="btEta" style="color:var(--text2)">估算中…</b></span>
       </div>
-      <div style="margin-top:14px;padding:10px 12px;background:var(--surface2);border-radius:5px;display:flex;flex-direction:column;gap:8px">
-        <div style="font-size:11px;font-weight:700;color:var(--text)">回测参数</div>
-        <div style="display:flex;gap:14px;font-size:11px;flex-wrap:wrap;align-items:center">
-          <label style="display:flex;align-items:center;gap:4px;color:var(--text2)">
-            回看：<select id="btLookback" style="height:24px;padding:0 8px">
-              <option value="12">12 个月</option>
-              <option value="24" selected>24 个月</option>
-              <option value="36">36 个月</option>
-              <option value="60">60 个月（含 2022 熊市）</option>
-            </select>
-          </label>
-          <label style="display:flex;align-items:center;gap:4px;color:var(--text2)">
-            交易成本：<select id="btCost" style="height:24px;padding:0 8px">
-              <option value="0">0 bps（理想化）</option>
-              <option value="5">5 bps（机构）</option>
-              <option value="10" selected>10 bps（散户实盘）</option>
-              <option value="20">20 bps（保守）</option>
-            </select>
-          </label>
-          <label style="display:flex;align-items:center;gap:6px;color:var(--text2);cursor:pointer">
-            <input type="checkbox" id="btBalance" style="margin:0"> 板块均衡（每板块≤2只）
-          </label>
-          <button onclick="runBacktestCompare()" style="margin-left:auto;height:28px;padding:0 12px;border-radius:5px;border:1px solid var(--accent);background:#fff;color:var(--accent);font-size:12px;font-weight:700;cursor:pointer">
-            🆚 对比所有策略
-          </button>
-        </div>
-        <div style="font-size:10px;color:var(--text3);line-height:1.5">
-          💡 每月100%换仓 = 双边成本 × 12次/年。10 bps 是富途/IB 等券商加 0.05% 滑点的常见水平。
-        </div>
+      <div style="margin-top:14px;padding:10px 12px;background:var(--surface2);border-radius:5px;font-size:11px;color:var(--text2);line-height:1.6">
+        💡 NASDAQ-100 通常 60-90 秒；S&P 500 90-150 秒。完成后结果缓存 6 小时。
       </div>
-      <button onclick="closeBacktest()" style="margin-top:12px;width:100%;padding:8px;border-radius:5px;border:1px solid var(--border);background:var(--surface);color:var(--text2);font-size:12px;font-weight:600;cursor:pointer">取消（结果仍在后台计算，可重新打开查看）</button>
+      <button onclick="closeBacktest()" style="margin-top:12px;width:100%;padding:8px;border-radius:5px;border:1px solid var(--border);background:var(--surface);color:var(--text2);font-size:12px;font-weight:600;cursor:pointer">
+        关闭（结果仍在后台计算，可重新打开查看）
+      </button>
     </div>`;
 
-  // 启动 UI 刷新计时器（每 500ms 更新已用时间/ETA）
   if (_btProgressTimer) clearInterval(_btProgressTimer);
   _btProgressTimer = setInterval(_btUpdateUI, 500);
   _btUpdateUI();
@@ -1433,10 +1489,10 @@ async function runBacktest() {
       strategy,
       universe: document.getElementById('universe').value,
       sector_filter: document.getElementById('sector_filter').value,
-      lookback_months: parseInt(document.getElementById('btLookback')?.value || 24),
+      lookback_months: lookback,
       hold_n: 10,
-      cost_bps: parseInt(document.getElementById('btCost')?.value || 10),
-      balance_sectors: document.getElementById('btBalance')?.checked || false,
+      cost_bps: cost,
+      balance_sectors: balance,
     };
     const r = await fetch('/api/backtest', {
       method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)
@@ -1446,7 +1502,7 @@ async function runBacktest() {
       _btRunning = false;
       if (_btProgressTimer) clearInterval(_btProgressTimer);
       document.getElementById('btBody').innerHTML = `<div style="color:var(--red);padding:20px">${esc(d.error)}</div>`;
-      btn.disabled = false;
+      document.getElementById('btnBacktest').disabled = false;
       return;
     }
     // cache hit: server returned full payload directly
@@ -1461,7 +1517,7 @@ async function runBacktest() {
     _btRunning = false;
     if (_btProgressTimer) clearInterval(_btProgressTimer);
     document.getElementById('btBody').innerHTML = `<div style="color:var(--red);padding:20px">${esc(e.message)}</div>`;
-    btn.disabled = false;
+    document.getElementById('btnBacktest').disabled = false;
   }
 }
 
@@ -1487,6 +1543,7 @@ const STRAT_TERMS = {
 
 async function runBacktestCompare() {
   if (_cmpRunning) return;
+  _saveBtParams();
   _cmpRunning = true;
   _cmpResults = {};
   _btRunning = true;   // 复用现有 log 监听更新顶部进度
