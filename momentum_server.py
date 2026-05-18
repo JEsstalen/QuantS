@@ -1597,37 +1597,49 @@ def api_run():
 _backtest_cache: dict = {}   # key -> (ts, result)
 _BACKTEST_TTL = 6 * 3600
 
-def _run_backtest(strategy_key, universe, sector_filter, lookback_months, hold_n=10, cost_bps=10, balance_sectors=False, max_per_sector=2):
+def _run_backtest(strategy_key, universe, sector_filter, lookback_months, hold_n=10, cost_bps=10, balance_sectors=False, max_per_sector=2, _shared=None):
     """走前向回测 — 每月初按策略选前 N 只持有一个月
     cost_bps: 每次换仓的双边交易成本（bps，含滑点）。10 bps = 0.1% per turnover
     balance_sectors: 是否每板块最多 max_per_sector 只
+    _shared: 对比模式下传入 {"meta":..., "prices":..., "spy":..., "month_ends":..., "start_str":..., "end_str":...}
+             以复用数据；为 None 时各自下载
     """
     import pandas as pd, numpy as np, yfinance as yf
     # 不同策略需要的最小信号窗口不同
     # connors_rsi / high52w 需要 ≥200 交易日（≈10 个月），其它 6 个月够
     SIG_WIN_MONTHS = 12 if strategy_key in ("connors_rsi", "high52w") else 6
     bal_tag = "板块均衡" if balance_sectors else "原始排序"
-    log(f"回测准备：{strategy_key} · 回看 {lookback_months} 月 · {bal_tag} · 成本 {cost_bps}bps", 5)
     cost_rate = cost_bps / 10000.0
 
-    # 1. 建股票池
-    meta = build_universe(universe, sector_filter)
+    if _shared is None:
+        log(f"回测准备：{strategy_key} · 回看 {lookback_months} 月 · {bal_tag} · 成本 {cost_bps}bps", 5)
+        # 1. 建股票池
+        meta = build_universe(universe, sector_filter)
 
-    # 2. 一次性拉所有价格（多拉一段作信号窗口）
-    end = pd.Timestamp.today()
-    start = end - pd.DateOffset(months=lookback_months + SIG_WIN_MONTHS)
-    start_str, end_str = start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
-    log("下载历史价格…", 12)
-    prices_full = load_prices(meta["Ticker"].tolist(), start_str, end_str)
+        # 2. 一次性拉所有价格
+        end = pd.Timestamp.today()
+        start = end - pd.DateOffset(months=lookback_months + SIG_WIN_MONTHS)
+        start_str, end_str = start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+        log("下载历史价格…", 12)
+        prices_full = load_prices(meta["Ticker"].tolist(), start_str, end_str)
 
-    # 3. 基准 SPY
-    log("下载 SPY 基准…", 35)
-    spy = yf.download("SPY", start=start_str, end=end_str, auto_adjust=True, progress=False)["Close"].dropna()
-    if hasattr(spy, "ndim") and spy.ndim == 2: spy = spy.iloc[:, 0]
+        # 3. 基准 SPY
+        log("下载 SPY 基准…", 35)
+        spy = yf.download("SPY", start=start_str, end=end_str, auto_adjust=True, progress=False)["Close"].dropna()
+        if hasattr(spy, "ndim") and spy.ndim == 2: spy = spy.iloc[:, 0]
 
-    # 4. 找月初日期序列（每个月第一个交易日），取最近 lookback_months 个
-    monthly = prices_full.resample("ME").last()
-    month_ends = monthly.index[-(lookback_months+1):]   # 多取1个作起点
+        # 4. 月底日期序列
+        monthly = prices_full.resample("ME").last()
+        month_ends = monthly.index[-(lookback_months+1):]
+    else:
+        # 复用已加载的数据
+        meta        = _shared["meta"]
+        prices_full = _shared["prices"]
+        spy         = _shared["spy"]
+        month_ends  = _shared["month_ends"]
+        start_str   = _shared["start_str"]
+        end_str     = _shared["end_str"]
+        log(f"回测：{strategy_key} · {bal_tag}（复用数据）", 8)
 
     # 5. 每个月底用前6个月数据跑策略 → 选前N → 持有到下月底
     fn = STRATEGIES.get(strategy_key, calc_momentum)
@@ -1901,19 +1913,44 @@ def api_backtest_compare():
         return jsonify({"error": "已有回测运行中，请稍候"}), 429
 
     def worker():
-        import time as _t
+        import time as _t, pandas as pd, yfinance as yf
         try:
+            # 一次性加载所有策略共享的数据：meta / prices / spy / month_ends
+            # 取最大信号窗口（12 个月）确保所有策略都有足够数据
+            log("加载共享数据：股票池…", 3)
+            meta = build_universe(universe, sector_filter)
+            end = pd.Timestamp.today()
+            SIG_WIN = 12
+            start = end - pd.DateOffset(months=lookback + SIG_WIN)
+            start_str, end_str = start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+            log("加载共享数据：历史价格…", 6)
+            prices_full = load_prices(meta["Ticker"].tolist(), start_str, end_str)
+            log("加载共享数据：SPY 基准…", 8)
+            spy = yf.download("SPY", start=start_str, end=end_str, auto_adjust=True, progress=False)["Close"].dropna()
+            if hasattr(spy, "ndim") and spy.ndim == 2: spy = spy.iloc[:, 0]
+            monthly = prices_full.resample("ME").last()
+            month_ends = monthly.index[-(lookback+1):]
+            shared = {
+                "meta": meta, "prices": prices_full, "spy": spy,
+                "month_ends": month_ends,
+                "start_str": start_str, "end_str": end_str,
+            }
+            log(f"共享数据就绪：{len(meta)} 只 · {len(month_ends)-1} 期", 10)
+
             results = {}
+            res = None
             for i, sk in enumerate(strategies):
                 key = f"{sk}|{universe}|{sector_filter}|{lookback}|{hold_n}|{cost_bps}|{int(balance_sectors)}"
                 entry = _backtest_cache.get(key)
+                pct_base = 10 + int(i / len(strategies) * 88)
                 if entry and _t.time() - entry[0] < _BACKTEST_TTL:
-                    log(f"[{i+1}/{len(strategies)}] {sk}：缓存命中", int((i+1)/len(strategies)*100))
+                    log(f"[{i+1}/{len(strategies)}] {sk}：缓存命中", pct_base)
                     res = entry[1]
                 else:
-                    log(f"[{i+1}/{len(strategies)}] {sk}：开始回测…", int(i/len(strategies)*100))
+                    log(f"[{i+1}/{len(strategies)}] {sk}：开始回测…", pct_base)
                     try:
-                        res = _run_backtest(sk, universe, sector_filter, lookback, hold_n, cost_bps, balance_sectors=balance_sectors)
+                        res = _run_backtest(sk, universe, sector_filter, lookback, hold_n, cost_bps,
+                                            balance_sectors=balance_sectors, _shared=shared)
                         _backtest_cache[key] = (_t.time(), res)
                     except Exception as e:
                         log(f"[{i+1}/{len(strategies)}] {sk} 失败：{e}", -1)
@@ -1923,12 +1960,12 @@ def api_backtest_compare():
                     "equity": res["equity"],
                     "dates":  res["dates"],
                 }
-                # 实时推送：每跑完一个，推一次
-                _broadcast("compare_partial", {"strategy": sk, "data": results[sk]})
+                _broadcast("compare_partial", {"strategy": sk, "data": results[sk],
+                                               "completed": i+1, "total": len(strategies)})
 
             _broadcast("compare_done", {
                 "results": results,
-                "bench_equity": res["bench"] if results else None,
+                "bench_equity": res["bench"] if res else None,
                 "lookback": lookback, "cost_bps": cost_bps,
                 "balance_sectors": balance_sectors,
                 "universe": universe,

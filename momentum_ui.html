@@ -1345,12 +1345,20 @@ function _btFmtTime(s) {
 function _btUpdateUI() {
   if (!_btRunning) return;
   const elapsed = (Date.now() - _btStartTs) / 1000;
-  // 简单线性估算：pct 0->100 推算总时间，剩余 = 总-已用
   let etaStr = '估算中…';
-  if (_btLastPct > 5) {
+  // 对比模式：用 (已完成+当前内部进度)/总数 计算总体进度
+  if (_cmpRunning) {
+    const total = _cmpStrategies.length;
+    const done  = Object.keys(_cmpResults).length;
+    const innerProgress = Math.max(0, Math.min(1, _btLastPct / 100));
+    const fractional = (done + innerProgress) / total;
+    if (fractional > 0.05) {
+      const totalSec = elapsed / fractional;
+      etaStr = '约 ' + _btFmtTime(Math.max(0, totalSec - elapsed));
+    }
+  } else if (_btLastPct > 5) {
     const total = elapsed / (_btLastPct / 100);
-    const remain = Math.max(0, total - elapsed);
-    etaStr = '约 ' + _btFmtTime(remain);
+    etaStr = '约 ' + _btFmtTime(Math.max(0, total - elapsed));
   }
   const elEl = document.getElementById('btElapsed');
   const etEl = document.getElementById('btEta');
@@ -1358,7 +1366,16 @@ function _btUpdateUI() {
   const stEl = document.getElementById('btStep');
   if (elEl) elEl.textContent = _btFmtTime(elapsed);
   if (etEl) etEl.textContent = etaStr;
-  if (pgEl) pgEl.style.width = _btLastPct + '%';
+  if (pgEl) {
+    if (_cmpRunning) {
+      const total = _cmpStrategies.length;
+      const done  = Object.keys(_cmpResults).length;
+      const overall = Math.min(100, ((done + _btLastPct/100) / total) * 100);
+      pgEl.style.width = overall.toFixed(1) + '%';
+    } else {
+      pgEl.style.width = _btLastPct + '%';
+    }
+  }
   if (stEl) stEl.textContent = _btLastStep || '准备中…';
 }
 
