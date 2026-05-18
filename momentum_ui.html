@@ -1388,11 +1388,32 @@ function openBacktestConfig() {
   const btn = document.getElementById('btnBacktest');
   btn.disabled = true;
   document.getElementById('btModal').classList.add('show');
-  document.getElementById('btTitle').textContent = `回测设置 · 当前策略：${STRAT_META[strategy]?.desc?.slice(0,24) || strategy}`;
+  document.getElementById('btTitle').textContent = '回测设置';
+  // 生成策略选项（按 short / mid / long 分组）
+  const STRAT_GROUPS = [
+    ['短线', ['connors_rsi']],
+    ['中线', ['momentum','momentum_quality','low_vol','dual_momentum','multifactor']],
+    ['长线', ['piotroski','high52w']],
+  ];
+  let stratOpts = '';
+  STRAT_GROUPS.forEach(([label, keys]) => {
+    stratOpts += `<optgroup label="${label}">`;
+    keys.forEach(k => {
+      const name = STRAT_META[k]?.desc?.split('；')[0]?.split('（')[0]?.slice(0,18) || k;
+      const sel = k === strategy ? ' selected' : '';
+      stratOpts += `<option value="${k}"${sel}>${name}</option>`;
+    });
+    stratOpts += '</optgroup>';
+  });
+
   document.getElementById('btBody').innerHTML = `
     <div style="padding:6px 4px">
       <div style="padding:14px 16px;background:var(--surface2);border-radius:6px;display:flex;flex-direction:column;gap:12px">
         <div style="font-size:12px;font-weight:700;color:var(--text)">回测参数</div>
+        <label style="display:flex;flex-direction:column;gap:4px;font-size:12px">
+          <span style="color:var(--text2)">策略</span>
+          <select id="btStrategy" style="height:30px;padding:0 8px">${stratOpts}</select>
+        </label>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:12px">
           <label style="display:flex;flex-direction:column;gap:4px">
             <span style="color:var(--text2)">回看窗口</span>
@@ -1428,7 +1449,7 @@ function openBacktestConfig() {
 
       <div style="display:flex;gap:8px;margin-top:14px">
         <button onclick="startBacktestSingle()" class="btn-run" style="flex:1;justify-content:center;height:38px">
-          ▶ 开始回测（当前策略）
+          ▶ 开始回测
         </button>
         <button onclick="runBacktestCompare()" style="flex:1;height:38px;padding:0 14px;border-radius:var(--radius);border:1px solid var(--accent);background:#fff;color:var(--accent);font-weight:700;cursor:pointer;font-size:13px">
           🆚 对比所有策略
@@ -1445,6 +1466,7 @@ function openBacktestConfig() {
       if (s.lookback) document.getElementById('btLookback').value = s.lookback;
       if (s.cost) document.getElementById('btCost').value = s.cost;
       if (s.balance) document.getElementById('btBalance').checked = true;
+      // 策略不从 localStorage 恢复，跟随当前选中策略
     }
   } catch(_) {}
 }
@@ -1466,11 +1488,12 @@ async function startBacktestSingle() {
   _btLastPct = 0;
   _btLastStep = '初始化…';
 
+  const chosenStrategy = document.getElementById('btStrategy')?.value || strategy;
   const lookback = parseInt(document.getElementById('btLookback')?.value || 24);
   const cost     = parseInt(document.getElementById('btCost')?.value || 10);
   const balance  = document.getElementById('btBalance')?.checked || false;
 
-  document.getElementById('btTitle').textContent = `策略回测 · ${STRAT_META[strategy]?.desc?.slice(0,30) || strategy}`;
+  document.getElementById('btTitle').textContent = `策略回测 · ${STRAT_META[chosenStrategy]?.desc?.slice(0,30) || chosenStrategy}`;
   document.getElementById('btBody').innerHTML = `
     <div style="padding:10px 4px">
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
@@ -1503,7 +1526,7 @@ async function startBacktestSingle() {
 
   try {
     const body = {
-      strategy,
+      strategy: chosenStrategy,
       universe: document.getElementById('universe').value,
       sector_filter: document.getElementById('sector_filter').value,
       lookback_months: lookback,

@@ -1915,8 +1915,6 @@ def api_backtest_compare():
     def worker():
         import time as _t, pandas as pd, yfinance as yf
         try:
-            # 一次性加载所有策略共享的数据：meta / prices / spy / month_ends
-            # 取最大信号窗口（12 个月）确保所有策略都有足够数据
             log("加载共享数据：股票池…", 3)
             meta = build_universe(universe, sector_filter)
             end = pd.Timestamp.today()
@@ -1935,37 +1933,52 @@ def api_backtest_compare():
                 "month_ends": month_ends,
                 "start_str": start_str, "end_str": end_str,
             }
-            log(f"共享数据就绪：{len(meta)} 只 · {len(month_ends)-1} 期", 10)
+            log(f"共享数据就绪：{len(meta)} 只 · {len(month_ends)-1} 期 · 并发跑 {len(strategies)} 个策略…", 12)
 
             results = {}
-            res = None
-            for i, sk in enumerate(strategies):
+            res_last = None
+            done_lock = threading.Lock()
+            done_count = [0]
+            total = len(strategies)
+
+            def _one(sk):
                 key = f"{sk}|{universe}|{sector_filter}|{lookback}|{hold_n}|{cost_bps}|{int(balance_sectors)}"
                 entry = _backtest_cache.get(key)
-                pct_base = 10 + int(i / len(strategies) * 88)
                 if entry and _t.time() - entry[0] < _BACKTEST_TTL:
-                    log(f"[{i+1}/{len(strategies)}] {sk}：缓存命中", pct_base)
-                    res = entry[1]
-                else:
-                    log(f"[{i+1}/{len(strategies)}] {sk}：开始回测…", pct_base)
-                    try:
-                        res = _run_backtest(sk, universe, sector_filter, lookback, hold_n, cost_bps,
-                                            balance_sectors=balance_sectors, _shared=shared)
-                        _backtest_cache[key] = (_t.time(), res)
-                    except Exception as e:
-                        log(f"[{i+1}/{len(strategies)}] {sk} 失败：{e}", -1)
+                    return sk, entry[1], "cached"
+                try:
+                    res = _run_backtest(sk, universe, sector_filter, lookback, hold_n, cost_bps,
+                                        balance_sectors=balance_sectors, _shared=shared)
+                    _backtest_cache[key] = (_t.time(), res)
+                    return sk, res, "ok"
+                except Exception as e:
+                    return sk, None, f"err:{e}"
+
+            # 8 个策略并发跑（数据已共享，纯 CPU 计算）
+            # 用线程池而非进程池：pandas/numpy 释放 GIL，且无需序列化大数据
+            with ThreadPoolExecutor(max_workers=4) as ex:
+                futs = {ex.submit(_one, sk): sk for sk in strategies}
+                for f in as_completed(futs):
+                    sk, res, status = f.result()
+                    with done_lock:
+                        done_count[0] += 1
+                        pct = 12 + int(done_count[0] / total * 86)
+                    if res is None:
+                        log(f"[{done_count[0]}/{total}] {sk} 失败：{status}", pct)
                         continue
-                results[sk] = {
-                    "stats":  res["stats"],
-                    "equity": res["equity"],
-                    "dates":  res["dates"],
-                }
-                _broadcast("compare_partial", {"strategy": sk, "data": results[sk],
-                                               "completed": i+1, "total": len(strategies)})
+                    res_last = res
+                    log(f"[{done_count[0]}/{total}] {sk} 完成（{status}）", pct)
+                    results[sk] = {
+                        "stats":  res["stats"],
+                        "equity": res["equity"],
+                        "dates":  res["dates"],
+                    }
+                    _broadcast("compare_partial", {"strategy": sk, "data": results[sk],
+                                                   "completed": done_count[0], "total": total})
 
             _broadcast("compare_done", {
                 "results": results,
-                "bench_equity": res["bench"] if res else None,
+                "bench_equity": res_last["bench"] if res_last else None,
                 "lookback": lookback, "cost_bps": cost_bps,
                 "balance_sectors": balance_sectors,
                 "universe": universe,
