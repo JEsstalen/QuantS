@@ -1602,15 +1602,18 @@ def _run_backtest(strategy_key, universe, sector_filter, lookback_months, hold_n
     cost_bps: 每次换仓的双边交易成本（bps，含滑点）。10 bps = 0.1% per turnover
     """
     import pandas as pd, numpy as np, yfinance as yf
-    log(f"回测准备：{strategy_key} · 回看 {lookback_months} 月 · 成本 {cost_bps}bps", 5)
+    # 不同策略需要的最小信号窗口不同
+    # connors_rsi / high52w 需要 ≥200 交易日（≈10 个月），其它 6 个月够
+    SIG_WIN_MONTHS = 12 if strategy_key in ("connors_rsi", "high52w") else 6
+    log(f"回测准备：{strategy_key} · 回看 {lookback_months} 月 · 信号窗口 {SIG_WIN_MONTHS} 月 · 成本 {cost_bps}bps", 5)
     cost_rate = cost_bps / 10000.0
 
     # 1. 建股票池
     meta = build_universe(universe, sector_filter)
 
-    # 2. 一次性拉所有价格（多拉6个月作信号窗口）
+    # 2. 一次性拉所有价格（多拉一段作信号窗口）
     end = pd.Timestamp.today()
-    start = end - pd.DateOffset(months=lookback_months + 6)
+    start = end - pd.DateOffset(months=lookback_months + SIG_WIN_MONTHS)
     start_str, end_str = start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
     log("下载历史价格…", 12)
     prices_full = load_prices(meta["Ticker"].tolist(), start_str, end_str)
@@ -1636,8 +1639,8 @@ def _run_backtest(strategy_key, universe, sector_filter, lookback_months, hold_n
     for i in range(len(month_ends) - 1):
         sig_end   = month_ends[i]
         hold_end  = month_ends[i+1]
-        # 信号窗口：sig_end 往前 6 个月
-        sig_start = sig_end - pd.DateOffset(months=6)
+        # 信号窗口：按策略需要
+        sig_start = sig_end - pd.DateOffset(months=SIG_WIN_MONTHS)
         pct_progress = 40 + int((i / max(1, len(month_ends)-2)) * 55)
         log(f"回测 {sig_end.strftime('%Y-%m')}…", pct_progress)
 
