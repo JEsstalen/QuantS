@@ -390,6 +390,21 @@ tr.selected td:first-child{border-left:2px solid var(--accent);padding-left:10px
 .modal-head{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
 .modal-head h3{font-size:15px;font-weight:800;margin:0}
 .modal-body{padding:16px 18px;display:flex;flex-direction:column;gap:14px}
+.bt-cmp-table{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px}
+.bt-cmp-table th{padding:7px 8px;border-bottom:2px solid var(--border);text-align:right;font-size:10px;color:var(--text2);font-weight:700;text-transform:uppercase;background:var(--surface2)}
+.bt-cmp-table th:first-child,.bt-cmp-table td:first-child{text-align:left}
+.bt-cmp-table td{padding:6px 8px;border-bottom:1px solid var(--border);text-align:right;font-variant-numeric:tabular-nums}
+.bt-cmp-table tr.cmp-loading td{color:var(--text3);background:var(--surface2)}
+.bt-cmp-table tr:hover:not(.cmp-loading) td{background:rgba(37,99,235,.04)}
+.bt-cmp-table td.strat-cell{font-weight:700;color:var(--accent);cursor:pointer}
+.bt-cmp-table td.strat-cell:hover{text-decoration:underline}
+.bt-cmp-table td.term-tag{font-size:10px}
+.bt-cmp-table td.term-tag .pill{padding:1px 6px;border-radius:3px;font-weight:700}
+.bt-cmp-table .pill-short{background:rgba(220,38,38,.1);color:#b91c1c}
+.bt-cmp-table .pill-mid  {background:rgba(217,119,6,.1);color:#b45309}
+.bt-cmp-table .pill-long {background:rgba(22,163,74,.1);color:#15803d}
+.bt-cmp-chart{background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:10px;height:320px;position:relative;margin-top:10px}
+.bt-cmp-progress{display:flex;align-items:center;gap:8px;padding:8px;color:var(--text2);font-size:12px}
 .bt-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
 .bt-stat{background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:9px 11px}
 .bt-stat-lbl{font-size:10px;color:var(--text3);font-weight:700;text-transform:uppercase;letter-spacing:.04em;margin-bottom:3px}
@@ -1377,9 +1392,9 @@ async function runBacktest() {
       </div>
       <div style="margin-top:14px;padding:10px 12px;background:var(--surface2);border-radius:5px;display:flex;flex-direction:column;gap:8px">
         <div style="font-size:11px;font-weight:700;color:var(--text)">回测参数</div>
-        <div style="display:flex;gap:14px;font-size:11px;flex-wrap:wrap">
+        <div style="display:flex;gap:14px;font-size:11px;flex-wrap:wrap;align-items:center">
           <label style="display:flex;align-items:center;gap:4px;color:var(--text2)">
-            回看：<select id="btLookback" onchange="_btParamsDirty=true" style="height:24px;padding:0 8px">
+            回看：<select id="btLookback" style="height:24px;padding:0 8px">
               <option value="12">12 个月</option>
               <option value="24" selected>24 个月</option>
               <option value="36">36 个月</option>
@@ -1387,13 +1402,19 @@ async function runBacktest() {
             </select>
           </label>
           <label style="display:flex;align-items:center;gap:4px;color:var(--text2)">
-            交易成本：<select id="btCost" onchange="_btParamsDirty=true" style="height:24px;padding:0 8px">
+            交易成本：<select id="btCost" style="height:24px;padding:0 8px">
               <option value="0">0 bps（理想化）</option>
               <option value="5">5 bps（机构）</option>
               <option value="10" selected>10 bps（散户实盘）</option>
               <option value="20">20 bps（保守）</option>
             </select>
           </label>
+          <label style="display:flex;align-items:center;gap:6px;color:var(--text2);cursor:pointer">
+            <input type="checkbox" id="btBalance" style="margin:0"> 板块均衡（每板块≤2只）
+          </label>
+          <button onclick="runBacktestCompare()" style="margin-left:auto;height:28px;padding:0 12px;border-radius:5px;border:1px solid var(--accent);background:#fff;color:var(--accent);font-size:12px;font-weight:700;cursor:pointer">
+            🆚 对比所有策略
+          </button>
         </div>
         <div style="font-size:10px;color:var(--text3);line-height:1.5">
           💡 每月100%换仓 = 双边成本 × 12次/年。10 bps 是富途/IB 等券商加 0.05% 滑点的常见水平。
@@ -1415,6 +1436,7 @@ async function runBacktest() {
       lookback_months: parseInt(document.getElementById('btLookback')?.value || 24),
       hold_n: 10,
       cost_bps: parseInt(document.getElementById('btCost')?.value || 10),
+      balance_sectors: document.getElementById('btBalance')?.checked || false,
     };
     const r = await fetch('/api/backtest', {
       method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)
@@ -1448,6 +1470,190 @@ function closeBacktest() {
   document.getElementById('btnBacktest').disabled = false;
   // _btRunning 不清，让后台继续算；下次打开走缓存
 }
+// ── multi-strategy compare ───────────────────────────────────────────────
+let _cmpRunning = false;
+let _cmpResults = {};
+let _cmpStrategies = ['momentum','momentum_quality','low_vol','dual_momentum','multifactor','high52w','connors_rsi','piotroski'];
+const STRAT_TERMS = {
+  connors_rsi:      ['short','短线'],
+  momentum:         ['mid','中线'],
+  momentum_quality: ['mid','中线'],
+  low_vol:          ['mid','中线'],
+  dual_momentum:    ['mid','中线'],
+  multifactor:      ['mid','中线'],
+  piotroski:        ['long','长线'],
+  high52w:          ['long','长线'],
+};
+
+async function runBacktestCompare() {
+  if (_cmpRunning) return;
+  _cmpRunning = true;
+  _cmpResults = {};
+  _btRunning = true;   // 复用现有 log 监听更新顶部进度
+  _btStartTs = Date.now();
+  _btLastPct = 0;
+  _btLastStep = '准备对比 8 个策略…';
+  if (_btProgressTimer) clearInterval(_btProgressTimer);
+  _btProgressTimer = setInterval(_btUpdateUI, 500);
+
+  const lookback = parseInt(document.getElementById('btLookback')?.value || 24);
+  const cost     = parseInt(document.getElementById('btCost')?.value || 10);
+  const balance  = document.getElementById('btBalance')?.checked || false;
+
+  document.getElementById('btTitle').textContent = `策略对比 · ${lookback}月 · ${cost}bps${balance?' · 板块均衡':''}`;
+  renderCompareView();
+
+  try {
+    const body = {
+      universe: document.getElementById('universe').value,
+      sector_filter: document.getElementById('sector_filter').value,
+      lookback_months: lookback,
+      hold_n: 10,
+      cost_bps: cost,
+      balance_sectors: balance,
+    };
+    const r = await fetch('/api/backtest/compare', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)
+    });
+    const d = await r.json();
+    if (d.error) {
+      _cmpRunning = false; _btRunning = false;
+      if (_btProgressTimer) clearInterval(_btProgressTimer);
+      document.getElementById('btBody').innerHTML = `<div style="color:var(--red);padding:20px">${esc(d.error)}</div>`;
+      return;
+    }
+  } catch (e) {
+    _cmpRunning = false; _btRunning = false;
+    if (_btProgressTimer) clearInterval(_btProgressTimer);
+    document.getElementById('btBody').innerHTML = `<div style="color:var(--red);padding:20px">${esc(e.message)}</div>`;
+  }
+}
+
+function renderCompareView() {
+  let rows = '';
+  _cmpStrategies.forEach(sk => {
+    const r = _cmpResults[sk];
+    const term = STRAT_TERMS[sk] || ['mid','中线'];
+    const stratLabel = STRAT_META[sk]?.desc?.split('；')[0]?.split('（')[0]?.slice(0,12) || sk;
+    if (!r) {
+      rows += `<tr class="cmp-loading">
+        <td class="strat-cell" onclick="setStrategy('${sk}')">${esc(stratLabel)}</td>
+        <td class="term-tag"><span class="pill pill-${term[0]}">${term[1]}</span></td>
+        <td colspan="6" style="text-align:left;color:var(--text3)"><span class="spinner" style="display:inline-block;vertical-align:middle;width:12px;height:12px;border-width:2px"></span> 等待回测…</td>
+      </tr>`;
+      return;
+    }
+    const s = r.stats;
+    const cumC = s.cum_ret >= 0 ? 'pos' : 'neg';
+    const alphaC = s.alpha >= 0 ? 'pos' : 'neg';
+    const wrC = s.win_rate >= 55 ? 'pos' : s.win_rate >= 45 ? 'neu' : 'neg';
+    const shC = s.sharpe >= 1 ? 'pos' : s.sharpe >= 0.5 ? 'neu' : 'neg';
+    rows += `<tr>
+      <td class="strat-cell" onclick="setStrategy('${sk}')">${esc(stratLabel)}</td>
+      <td class="term-tag"><span class="pill pill-${term[0]}">${term[1]}</span></td>
+      <td class="${cumC}">${s.cum_ret>0?'+':''}${s.cum_ret}%</td>
+      <td class="${alphaC}">${s.alpha>0?'+':''}${s.alpha}%</td>
+      <td>${s.cagr>0?'+':''}${s.cagr}%</td>
+      <td class="neg">${s.max_dd}%</td>
+      <td class="${wrC}">${s.win_rate}%</td>
+      <td class="${shC}">${s.sharpe}</td>
+    </tr>`;
+  });
+
+  // sort done rows by cum_ret desc (loading rows stay at bottom)
+  // we cheat by re-rendering — easier: just keep insertion order for now
+  document.getElementById('btBody').innerHTML = `
+    <div style="padding:6px 4px 10px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+        <div class="spinner" style="width:14px;height:14px;border-width:2px;${_cmpRunning?'':'display:none'}"></div>
+        <div style="flex:1">
+          <div id="btStep" style="font-weight:700;font-size:13px">${_btLastStep}</div>
+          <div style="font-size:11px;color:var(--text3)">已用 <b id="btElapsed" style="color:var(--text2)">0s</b> · 预计 <b id="btEta" style="color:var(--text2)">估算中…</b></div>
+        </div>
+      </div>
+      <div style="height:6px;background:var(--surface2);border-radius:3px;overflow:hidden;margin-bottom:10px">
+        <div id="btProgress" style="height:100%;background:var(--accent);width:${_btLastPct}%;transition:width .3s"></div>
+      </div>
+    </div>
+    <table class="bt-cmp-table">
+      <thead><tr>
+        <th>策略</th><th>期限</th><th>累计</th><th>α vs SPY</th><th>年化</th><th>最大回撤</th><th>胜率</th><th>Sharpe</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div class="bt-cmp-chart"><canvas id="cmpCanvas"></canvas></div>
+    <div style="font-size:11px;color:var(--text3);padding:6px 0;line-height:1.6">
+      点击左侧策略名直接切到该策略的明细。颜色：<span class="pos">绿</span>=排在前列 · <span class="neg">红</span>=排在末尾。
+    </div>`;
+  // draw chart if any results
+  const done = Object.keys(_cmpResults);
+  if (done.length) drawCompareChart();
+}
+
+// strategy color palette
+const STRAT_COLORS = {
+  momentum:'#2563eb', momentum_quality:'#7c3aed', low_vol:'#0891b2',
+  dual_momentum:'#d97706', multifactor:'#db2777', piotroski:'#16a34a',
+  high52w:'#dc2626', connors_rsi:'#475569',
+};
+
+function drawCompareChart() {
+  const c = document.getElementById('cmpCanvas');
+  if (!c) return;
+  const dpr = devicePixelRatio || 1;
+  const W = c.parentElement.clientWidth - 20, H = 300;
+  c.width = W*dpr; c.height = H*dpr;
+  c.style.width = W+'px'; c.style.height = H+'px';
+  const ctx = c.getContext('2d'); ctx.scale(dpr, dpr);
+
+  const done = Object.entries(_cmpResults);
+  if (!done.length) return;
+  // common date axis (use longest)
+  const dates = done.reduce((acc,[,r])=>r.dates.length>acc.length?r.dates:acc, []);
+  const allVals = done.flatMap(([,r])=>r.equity);
+  const mn = Math.min(1, ...allVals), mx = Math.max(...allVals);
+  const rng = mx-mn||1;
+  const pL=48, pR=110, pT=12, pB=22, cW=W-pL-pR, cH=H-pT-pB;
+  const xf = i => pL + i/(dates.length-1||1)*cW;
+  const yf = v => pT + (1-(v-mn)/rng)*cH;
+
+  // grid + y labels
+  ctx.strokeStyle='#e9ebee'; ctx.lineWidth=.5;
+  for(let i=0;i<=4;i++){
+    const y=pT+i/4*cH;
+    ctx.beginPath(); ctx.moveTo(pL,y); ctx.lineTo(pL+cW,y); ctx.stroke();
+    const val = mx-(mx-mn)*i/4;
+    ctx.fillStyle='#9ca3af'; ctx.font='10px system-ui'; ctx.textAlign='right';
+    ctx.fillText(((val-1)*100).toFixed(0)+'%', pL-4, y+3);
+  }
+  // baseline at 1
+  const yBase = yf(1);
+  ctx.strokeStyle='rgba(156,163,175,.5)'; ctx.setLineDash([3,3]);
+  ctx.beginPath(); ctx.moveTo(pL,yBase); ctx.lineTo(pL+cW,yBase); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // draw each strategy line
+  done.forEach(([sk, r], idx)=>{
+    const col = STRAT_COLORS[sk] || '#666';
+    ctx.beginPath();
+    r.equity.forEach((v,i)=>i===0?ctx.moveTo(xf(i),yf(v)):ctx.lineTo(xf(i),yf(v)));
+    ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.stroke();
+    // legend
+    const ly = pT + 14 + idx*16;
+    ctx.fillStyle = col; ctx.fillRect(pL+cW+8, ly-7, 12, 2);
+    ctx.fillStyle = '#111827'; ctx.font='600 10px system-ui'; ctx.textAlign='left';
+    const label = STRAT_META[sk]?.desc?.split('；')[0]?.split('（')[0]?.slice(0,9) || sk;
+    const final = ((r.equity[r.equity.length-1]-1)*100).toFixed(0);
+    ctx.fillText(`${label} ${final>0?'+':''}${final}%`, pL+cW+24, ly);
+  });
+
+  // dates axis
+  ctx.fillStyle='#9ca3af'; ctx.font='9px system-ui'; ctx.textAlign='center';
+  [0, Math.floor(dates.length/2), dates.length-1].forEach(i=>{
+    ctx.fillText(dates[i].slice(0,7), xf(i), H-6);
+  });
+}
+
 function renderBacktest(d) {
   _btRunning = false;
   if (_btProgressTimer) { clearInterval(_btProgressTimer); _btProgressTimer = null; }
@@ -1491,7 +1697,7 @@ function renderBacktest(d) {
       </div>
     </div>
     <div style="font-size:11px;color:var(--text3);padding:8px 0;border-top:1px solid var(--border);line-height:1.6">
-      回测说明：每个月底用前6个月数据跑策略 → 选前 ${d.hold_n} 等权持有1个月 → 月底换仓。已扣双边交易成本 <b>${d.cost_bps??10} bps</b>（约合每月-${((d.cost_bps??10)*2/100).toFixed(2)}%）。SPY 为基准未扣成本。回测窗口 ${d.lookback} 个月。
+      回测说明：每个月底用前6个月数据跑策略 → 选前 ${d.hold_n} 等权持有1个月 → 月底换仓。${d.balance_sectors?'<b>板块均衡</b>（每板块≤2只） · ':''}已扣双边交易成本 <b>${d.cost_bps??10} bps</b>（约合每月-${((d.cost_bps??10)*2/100).toFixed(2)}%）。SPY 为基准未扣成本。回测窗口 ${d.lookback} 个月。
     </div>`;
 
   drawBtChart('btCanvas', d.dates, d.equity, d.bench);
@@ -1659,6 +1865,20 @@ function connectSSE() {
       if (d.pct >= 0) _btLastPct = d.pct;
       _btUpdateUI();
     }
+  });
+  evtSource.addEventListener('compare_partial', e=>{
+    try {
+      const d = JSON.parse(e.data);
+      _cmpResults[d.strategy] = d.data;
+      renderCompareView();
+    } catch(_){}
+  });
+  evtSource.addEventListener('compare_done', e=>{
+    _cmpRunning = false; _btRunning = false;
+    if (_btProgressTimer) { clearInterval(_btProgressTimer); _btProgressTimer = null; }
+    _btLastStep = '对比完成';
+    _btLastPct = 100;
+    renderCompareView();
   });
   evtSource.addEventListener('backtest_done', e=>{
     try { renderBacktest(JSON.parse(e.data)); } catch(_) {}

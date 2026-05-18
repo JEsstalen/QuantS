@@ -1597,15 +1597,17 @@ def api_run():
 _backtest_cache: dict = {}   # key -> (ts, result)
 _BACKTEST_TTL = 6 * 3600
 
-def _run_backtest(strategy_key, universe, sector_filter, lookback_months, hold_n=10, cost_bps=10):
+def _run_backtest(strategy_key, universe, sector_filter, lookback_months, hold_n=10, cost_bps=10, balance_sectors=False, max_per_sector=2):
     """走前向回测 — 每月初按策略选前 N 只持有一个月
     cost_bps: 每次换仓的双边交易成本（bps，含滑点）。10 bps = 0.1% per turnover
+    balance_sectors: 是否每板块最多 max_per_sector 只
     """
     import pandas as pd, numpy as np, yfinance as yf
     # 不同策略需要的最小信号窗口不同
     # connors_rsi / high52w 需要 ≥200 交易日（≈10 个月），其它 6 个月够
     SIG_WIN_MONTHS = 12 if strategy_key in ("connors_rsi", "high52w") else 6
-    log(f"回测准备：{strategy_key} · 回看 {lookback_months} 月 · 信号窗口 {SIG_WIN_MONTHS} 月 · 成本 {cost_bps}bps", 5)
+    bal_tag = "板块均衡" if balance_sectors else "原始排序"
+    log(f"回测准备：{strategy_key} · 回看 {lookback_months} 月 · {bal_tag} · 成本 {cost_bps}bps", 5)
     cost_rate = cost_bps / 10000.0
 
     # 1. 建股票池
@@ -1664,7 +1666,12 @@ def _run_backtest(strategy_key, universe, sector_filter, lookback_months, hold_n
             dates.append(str(hold_end.date()))
             continue
 
-        top = df_rank.head(hold_n)["ticker"].tolist()
+        # 板块均衡（如开启）
+        if balance_sectors and "sector" in df_rank.columns:
+            balanced, _skipped = _balance_by_sector(df_rank, max_per_sector=max_per_sector, top_n=hold_n)
+            top = balanced["ticker"].tolist()
+        else:
+            top = df_rank.head(hold_n)["ticker"].tolist()
         # 持有期收益：sig_end → hold_end，等权
         port_ret = 0.0
         cnt = 0
@@ -1726,6 +1733,7 @@ def _run_backtest(strategy_key, universe, sector_filter, lookback_months, hold_n
         "lookback":   lookback_months,
         "hold_n":     hold_n,
         "cost_bps":   cost_bps,
+        "balance_sectors": balance_sectors,
         "dates":      dates,
         "equity":     [round(float(v), 4) for v in arr_eq],
         "bench":      [round(float(v), 4) for v in bench],
@@ -1755,7 +1763,8 @@ def api_backtest():
     lookback = int(body.get("lookback_months", 24))
     hold_n   = int(body.get("hold_n", 10))
     cost_bps = int(body.get("cost_bps", 10))
-    cache_key = f"{strategy}|{universe}|{sector_filter}|{lookback}|{hold_n}|{cost_bps}"
+    balance_sectors = bool(body.get("balance_sectors", False))
+    cache_key = f"{strategy}|{universe}|{sector_filter}|{lookback}|{hold_n}|{cost_bps}|{int(balance_sectors)}"
     import time as _t
     entry = _backtest_cache.get(cache_key)
     if entry and _t.time() - entry[0] < _BACKTEST_TTL:
@@ -1763,7 +1772,7 @@ def api_backtest():
 
     def worker():
         try:
-            result = _run_backtest(strategy, universe, sector_filter, lookback, hold_n, cost_bps)
+            result = _run_backtest(strategy, universe, sector_filter, lookback, hold_n, cost_bps, balance_sectors=balance_sectors)
             _backtest_cache[cache_key] = (_t.time(), result)
             _broadcast("backtest_done", result)
         except Exception as e:
@@ -1871,6 +1880,70 @@ def api_consensus():
 
     threading.Thread(target=run_release, daemon=True).start()
     return jsonify({"ok": True})
+
+# ─── 多策略对比回测 ──────────────────────────────────────────────────────────
+
+@app.route("/api/backtest/compare", methods=["POST"])
+def api_backtest_compare():
+    """对所有策略用同一参数跑回测，逐个完成 → 前端实时累积"""
+    body = request.json or {}
+    universe = body.get("universe", "nasdaq100")
+    sector_filter = body.get("sector_filter", "")
+    lookback = int(body.get("lookback_months", 24))
+    hold_n   = int(body.get("hold_n", 10))
+    cost_bps = int(body.get("cost_bps", 10))
+    balance_sectors = bool(body.get("balance_sectors", False))
+    # 完整 8 个策略；piotroski 单只就慢，5个月以下也别跑
+    strategies = ["momentum","momentum_quality","low_vol","dual_momentum",
+                  "multifactor","high52w","connors_rsi","piotroski"]
+
+    if not _backtest_lock.acquire(blocking=False):
+        return jsonify({"error": "已有回测运行中，请稍候"}), 429
+
+    def worker():
+        import time as _t
+        try:
+            results = {}
+            for i, sk in enumerate(strategies):
+                key = f"{sk}|{universe}|{sector_filter}|{lookback}|{hold_n}|{cost_bps}|{int(balance_sectors)}"
+                entry = _backtest_cache.get(key)
+                if entry and _t.time() - entry[0] < _BACKTEST_TTL:
+                    log(f"[{i+1}/{len(strategies)}] {sk}：缓存命中", int((i+1)/len(strategies)*100))
+                    res = entry[1]
+                else:
+                    log(f"[{i+1}/{len(strategies)}] {sk}：开始回测…", int(i/len(strategies)*100))
+                    try:
+                        res = _run_backtest(sk, universe, sector_filter, lookback, hold_n, cost_bps, balance_sectors=balance_sectors)
+                        _backtest_cache[key] = (_t.time(), res)
+                    except Exception as e:
+                        log(f"[{i+1}/{len(strategies)}] {sk} 失败：{e}", -1)
+                        continue
+                results[sk] = {
+                    "stats":  res["stats"],
+                    "equity": res["equity"],
+                    "dates":  res["dates"],
+                }
+                # 实时推送：每跑完一个，推一次
+                _broadcast("compare_partial", {"strategy": sk, "data": results[sk]})
+
+            _broadcast("compare_done", {
+                "results": results,
+                "bench_equity": res["bench"] if results else None,
+                "lookback": lookback, "cost_bps": cost_bps,
+                "balance_sectors": balance_sectors,
+                "universe": universe,
+            })
+        except Exception as e:
+            _broadcast("error", {"msg": "对比回测失败：" + str(e)})
+
+    def run_release():
+        try: worker()
+        finally: _backtest_lock.release()
+
+    threading.Thread(target=run_release, daemon=True).start()
+    return jsonify({"ok": True})
+
+# ─── 多策略对比回测 END ─────────────────────────────────────────────────────
 
 @app.route("/api/sectors")
 def api_sectors():
