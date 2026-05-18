@@ -442,6 +442,21 @@ tr.selected td:first-child{border-left:2px solid var(--accent);padding-left:10px
 .pb-accel-dn   {background:rgba(220,38,38,.18);color:#b91c1c}
 .pb-stabilizing{background:rgba(220,38,38,.08);color:#7f1d1d;border:1px dashed #dc2626}
 .pb-neutral    {background:var(--surface2);color:var(--text3)}
+.rrg-container{display:grid;grid-template-columns:1fr 280px;gap:14px;margin-top:8px}
+@media(max-width:980px){.rrg-container{grid-template-columns:1fr}}
+.rrg-canvas-wrap{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:8px}
+.rrg-canvas-wrap canvas{display:block;width:100%}
+.rrg-side{display:flex;flex-direction:column;gap:8px;max-height:540px;overflow-y:auto}
+.rrg-quad{padding:8px 10px;border-radius:6px}
+.rrg-quad-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:5px}
+.rrg-quad-list{display:flex;flex-wrap:wrap;gap:4px}
+.rrg-chip{background:var(--surface);border:1px solid var(--border);font-size:10px;padding:2px 7px;border-radius:3px;color:var(--text2);font-weight:600}
+.compact-list{display:flex;flex-direction:column;gap:4px;margin-top:8px}
+.compact-row{display:flex;align-items:center;gap:14px;padding:7px 12px;background:var(--surface);border:1px solid var(--border);border-radius:6px}
+.compact-meta{min-width:160px;display:flex;align-items:center;gap:8px}
+.compact-name{font-weight:700;font-size:13px}
+.compact-ticker{font-size:10px;color:var(--text3);font-weight:600;letter-spacing:.04em}
+.compact-spark{margin-left:auto}
 .heatmap-toolbar{display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap}
 .kind-tabs{display:flex;gap:0;background:var(--surface2);border-radius:6px;padding:2px;border:1px solid var(--border)}
 .kind-tabs button{height:26px;padding:0 14px;border:none;background:transparent;color:var(--text2);font-size:12px;font-weight:600;cursor:pointer;border-radius:4px}
@@ -555,6 +570,8 @@ tr.selected td:first-child{border-left:2px solid var(--accent);padding-left:10px
     </button>
   </div>
 
+  <!-- temp-strategy banner -->
+  <div id="tempBanner" style="display:none;padding:8px 20px;font-size:12px;font-weight:600;border-bottom:1px solid var(--border);align-items:center;gap:10px"></div>
   <!-- strategy description -->
   <div class="strat-desc" id="stratDesc">
     <div class="dot"></div>
@@ -702,9 +719,9 @@ const STRAT_META = {
     cols: ["rank","ticker","sector","price","dist_high","passed","high_52w","from_low","above_ma200","mom_mean","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
   },
   connors_rsi: {
-    desc: "Larry Connors 短线 mean reversion：200日均线之上+RSI(2)<5 极度超卖→反弹至5日均线之上卖出；持有 2-5 天",
+    desc: "Larry Connors 多周期短线：日线 RSI(2)<5 + 周线 RSI(14)>50（趋势仍向上）+ 200日均线之上 → 买入信号，反弹至 MA5 卖出",
     sortKey: "rsi2", sortAsc: true,
-    cols: ["rank","ticker","sector","price","signal","rsi2","rsi14","from_ma200","ma5","above_ma200","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
+    cols: ["rank","ticker","sector","price","signal","rsi2","rsi14","weekly_rsi","weekly_bullish","from_ma200","ma5","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
   },
 };
 
@@ -789,6 +806,12 @@ const COL_DEF = {
     return `<span class="num ${c}">${v>0?'+':''}${v}%</span>`;
   }},
   signal:       { label:'入场信号',     fmt:(v)=>v?'<span style="color:var(--green);font-weight:700;font-size:12px">✓ 买入</span>':'<span style="color:var(--text3);font-size:12px">—</span>' },
+  weekly_rsi:   { label:'周线RSI',      fmt:(v)=>{
+    if(v==null) return '—';
+    const c = v>50?'pos':v<50?'neg':'neu';
+    return `<span class="num ${c}">${v}</span>`;
+  }},
+  weekly_bullish:{ label:'周线趋势',    fmt:(v)=>v?'<span style="color:var(--green);font-weight:700;font-size:11px">↑ 向上</span>':'<span style="color:var(--red);font-size:11px">↓ 向下</span>' },
   // 目标价/止损（仅前10名）
   target:       { label:'目标价',       fmt:(v,r)=>{
     if(v==null) return '<span class="neu">—</span>';
@@ -849,6 +872,7 @@ function setView(v) {
   if (isSec  && !sectorsLoaded) loadSectorHeatmap();
   if (isWL) renderWatchlist();
   if (isCon && !_consensusData) renderConsensusEmpty();
+  updateTempBanner();
   saveSettings();
 }
 
@@ -1064,6 +1088,30 @@ function renderDashboard(data) {
   updateSummary(data);
 }
 
+let _lastTemp = null;
+function updateTempBanner() {
+  const b = document.getElementById('tempBanner');
+  if (!b || _lastTemp == null) return;
+  // 仅在策略视图显示
+  const inStr = document.getElementById('vtab-strategy')?.classList.contains('active');
+  if (!inStr) { b.style.display = 'none'; return; }
+  const t = _lastTemp;
+  let html = '', bg = '';
+  if (t > 70) {
+    bg = 'rgba(220,38,38,.08)'; html =
+      `<span style="color:var(--red)">⚠ 市场温度 ${t}（高位）</span> · 建议切到 <a onclick="setStrategy('low_vol')" style="color:var(--accent);cursor:pointer;text-decoration:underline">低波动</a> 或 <a onclick="setStrategy('dual_momentum')" style="color:var(--accent);cursor:pointer;text-decoration:underline">双动量</a>（绝对动量过滤，自动持有现金）`;
+  } else if (t < 30) {
+    bg = 'rgba(22,163,74,.08)'; html =
+      `<span style="color:var(--green)">✓ 市场温度 ${t}（机会窗口）</span> · 可考虑 <a onclick="setStrategy('momentum')" style="color:var(--accent);cursor:pointer;text-decoration:underline">纯动量</a> 或 <a onclick="setStrategy('high52w')" style="color:var(--accent);cursor:pointer;text-decoration:underline">52W新高</a>（趋势启动期）`;
+  } else {
+    bg = 'rgba(217,119,6,.06)'; html =
+      `<span style="color:var(--amber)">○ 市场温度 ${t}（中性）</span> · 当前策略 <b>${STRAT_META[strategy]?.desc?.split('；')[0]?.slice(0,30) || strategy}</b> 与温度匹配`;
+  }
+  b.innerHTML = html;
+  b.style.background = bg;
+  b.style.display = 'flex';
+}
+
 function updateSummary(data) {
   // 加权温度计
   let wScore=0, wTotal=0, reds=[], ambers=[];
@@ -1078,6 +1126,7 @@ function updateSummary(data) {
     else if (c==='amber') ambers.push(short);
   });
   const avg = wTotal ? Math.round(wScore/wTotal) : null;
+  _lastTemp = avg; updateTempBanner();
   const col = avg>70?'var(--red)':avg>45?'var(--amber)':'var(--green)';
   const ring = document.getElementById('tempRing');
   ring.style.borderColor = col;
@@ -1326,8 +1375,29 @@ async function runBacktest() {
         <span>已用 <b id="btElapsed" style="color:var(--text2)">0s</b></span>
         <span>预计剩余 <b id="btEta" style="color:var(--text2)">估算中…</b></span>
       </div>
-      <div style="margin-top:14px;padding:8px 10px;background:var(--surface2);border-radius:5px;font-size:11px;color:var(--text2);line-height:1.6">
-        <b style="color:var(--text)">💡 提示：</b>第一次回测需要下载 24 个月历史价格并跑 24 次策略，通常 60-120 秒；NASDAQ-100 比 S&P 500 快。完成后结果缓存 6 小时，下次同参数秒开。
+      <div style="margin-top:14px;padding:10px 12px;background:var(--surface2);border-radius:5px;display:flex;flex-direction:column;gap:8px">
+        <div style="font-size:11px;font-weight:700;color:var(--text)">回测参数</div>
+        <div style="display:flex;gap:14px;font-size:11px;flex-wrap:wrap">
+          <label style="display:flex;align-items:center;gap:4px;color:var(--text2)">
+            回看：<select id="btLookback" onchange="_btParamsDirty=true" style="height:24px;padding:0 8px">
+              <option value="12">12 个月</option>
+              <option value="24" selected>24 个月</option>
+              <option value="36">36 个月</option>
+              <option value="60">60 个月（含 2022 熊市）</option>
+            </select>
+          </label>
+          <label style="display:flex;align-items:center;gap:4px;color:var(--text2)">
+            交易成本：<select id="btCost" onchange="_btParamsDirty=true" style="height:24px;padding:0 8px">
+              <option value="0">0 bps（理想化）</option>
+              <option value="5">5 bps（机构）</option>
+              <option value="10" selected>10 bps（散户实盘）</option>
+              <option value="20">20 bps（保守）</option>
+            </select>
+          </label>
+        </div>
+        <div style="font-size:10px;color:var(--text3);line-height:1.5">
+          💡 每月100%换仓 = 双边成本 × 12次/年。10 bps 是富途/IB 等券商加 0.05% 滑点的常见水平。
+        </div>
       </div>
       <button onclick="closeBacktest()" style="margin-top:12px;width:100%;padding:8px;border-radius:5px;border:1px solid var(--border);background:var(--surface);color:var(--text2);font-size:12px;font-weight:600;cursor:pointer">取消（结果仍在后台计算，可重新打开查看）</button>
     </div>`;
@@ -1342,8 +1412,9 @@ async function runBacktest() {
       strategy,
       universe: document.getElementById('universe').value,
       sector_filter: document.getElementById('sector_filter').value,
-      lookback_months: 24,
+      lookback_months: parseInt(document.getElementById('btLookback')?.value || 24),
       hold_n: 10,
+      cost_bps: parseInt(document.getElementById('btCost')?.value || 10),
     };
     const r = await fetch('/api/backtest', {
       method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)
@@ -1420,7 +1491,7 @@ function renderBacktest(d) {
       </div>
     </div>
     <div style="font-size:11px;color:var(--text3);padding:8px 0;border-top:1px solid var(--border);line-height:1.6">
-      回测说明：每个月底用前6个月数据跑策略 → 选前 ${d.hold_n} 等权持有1个月 → 月底换仓。SPY 为基准，未扣交易成本与税。回测窗口 ${d.lookback} 个月。
+      回测说明：每个月底用前6个月数据跑策略 → 选前 ${d.hold_n} 等权持有1个月 → 月底换仓。已扣双边交易成本 <b>${d.cost_bps??10} bps</b>（约合每月-${((d.cost_bps??10)*2/100).toFixed(2)}%）。SPY 为基准未扣成本。回测窗口 ${d.lookback} 个月。
     </div>`;
 
   drawBtChart('btCanvas', d.dates, d.equity, d.bench);
@@ -2025,6 +2096,189 @@ function heatFmt(val, dec) {
   return (val > 0 ? '+' : '') + val.toFixed(dec) + '%';
 }
 
+// ── RRG quadrant view ────────────────────────────────────────────────────
+function renderRRG(data, toolbar) {
+  const wrap = document.getElementById('sectorHeatmapWrap');
+  const withRRG = data.sectors.filter(s => s.rrg_x != null && s.rrg_y != null);
+  if (!withRRG.length) {
+    wrap.innerHTML = toolbar + '<div class="empty-state"><p>RRG 数据计算中或不可用，请刷新</p></div>';
+    return;
+  }
+  // legend & list
+  const quadInfo = {
+    leading:    {color:'#16a34a', bg:'rgba(22,163,74,.10)', label:'领涨', desc:'相对强 + 仍在加速'},
+    weakening:  {color:'#d97706', bg:'rgba(217,119,6,.10)', label:'走弱', desc:'相对强但动能减退'},
+    lagging:    {color:'#dc2626', bg:'rgba(220,38,38,.10)', label:'落后', desc:'相对弱 + 还在下滑'},
+    improving:  {color:'#2563eb', bg:'rgba(37,99,235,.10)', label:'改善', desc:'相对弱但动能恢复'},
+  };
+  const grouped = {leading:[], weakening:[], lagging:[], improving:[]};
+  withRRG.forEach(s => grouped[s.rrg_quadrant]?.push(s));
+
+  let html = toolbar + '<div class="rrg-container">';
+  html += '<div class="rrg-canvas-wrap"><canvas id="rrgCanvas"></canvas></div>';
+  html += '<div class="rrg-side">';
+  ['leading','improving','weakening','lagging'].forEach(q => {
+    const info = quadInfo[q];
+    const list = grouped[q] || [];
+    html += `<div class="rrg-quad" style="background:${info.bg};border-left:3px solid ${info.color}">
+      <div class="rrg-quad-head">
+        <span style="color:${info.color};font-weight:800">${info.label}</span>
+        <span style="color:var(--text3);font-size:10px">${list.length}个 · ${info.desc}</span>
+      </div>
+      <div class="rrg-quad-list">${list.map(s=>`<span class="rrg-chip" title="${esc(s.ticker)} ${s.cum5>=0?'+':''}${s.cum5}%">${esc(s.name)}</span>`).join('')}</div>
+    </div>`;
+  });
+  html += '</div></div>';
+  wrap.innerHTML = html;
+  // draw
+  setTimeout(()=>drawRRG(withRRG, quadInfo), 30);
+}
+
+function drawRRG(sectors, quadInfo) {
+  const c = document.getElementById('rrgCanvas');
+  if (!c) return;
+  const dpr = devicePixelRatio || 1;
+  const W = c.parentElement.clientWidth, H = Math.min(W * 0.85, 520);
+  c.width = W*dpr; c.height = H*dpr;
+  c.style.width = W+'px'; c.style.height = H+'px';
+  const ctx = c.getContext('2d'); ctx.scale(dpr, dpr);
+
+  // 自适应范围：以 100 为中心，根据数据扩张
+  const allX = sectors.flatMap(s => s.rrg_tail_x || [s.rrg_x]);
+  const allY = sectors.flatMap(s => s.rrg_tail_y || [s.rrg_y]);
+  const xR = Math.max(3, ...allX.map(v=>Math.abs(v-100)));
+  const yR = Math.max(3, ...allY.map(v=>Math.abs(v-100)));
+  const xMin = 100-xR*1.1, xMax = 100+xR*1.1;
+  const yMin = 100-yR*1.1, yMax = 100+yR*1.1;
+  const pad = 36;
+  const cW = W - pad*2, cH = H - pad*2;
+  const xf = v => pad + (v-xMin)/(xMax-xMin) * cW;
+  const yf = v => pad + (1-(v-yMin)/(yMax-yMin)) * cH;
+
+  // 象限背景填色
+  ctx.fillStyle = 'rgba(22,163,74,.05)';   ctx.fillRect(xf(100), yf(yMax), xf(xMax)-xf(100), yf(100)-yf(yMax));   // 领涨 右上
+  ctx.fillStyle = 'rgba(37,99,235,.05)';   ctx.fillRect(xf(xMin), yf(yMax), xf(100)-xf(xMin), yf(100)-yf(yMax)); // 改善 左上
+  ctx.fillStyle = 'rgba(220,38,38,.05)';   ctx.fillRect(xf(xMin), yf(100), xf(100)-xf(xMin), yf(yMin)-yf(100));  // 落后 左下
+  ctx.fillStyle = 'rgba(217,119,6,.05)';   ctx.fillRect(xf(100), yf(100), xf(xMax)-xf(100), yf(yMin)-yf(100));   // 走弱 右下
+
+  // 中心十字
+  ctx.strokeStyle = '#9ca3af'; ctx.setLineDash([3,3]); ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(xf(100), pad); ctx.lineTo(xf(100), pad+cH); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(pad, yf(100)); ctx.lineTo(pad+cW, yf(100)); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // 象限标签
+  ctx.font = 'bold 12px system-ui'; ctx.fillStyle = '#16a34a'; ctx.textAlign = 'right';
+  ctx.fillText('领涨 ↗', pad+cW-6, pad+14);
+  ctx.fillStyle = '#2563eb'; ctx.textAlign = 'left';
+  ctx.fillText('↖ 改善', pad+6, pad+14);
+  ctx.fillStyle = '#dc2626';
+  ctx.fillText('↙ 落后', pad+6, pad+cH-6);
+  ctx.fillStyle = '#d97706'; ctx.textAlign = 'right';
+  ctx.fillText('走弱 ↘', pad+cW-6, pad+cH-6);
+
+  // 轴标签
+  ctx.fillStyle = '#9ca3af'; ctx.font = '10px system-ui';
+  ctx.textAlign = 'center';
+  ctx.fillText('相对 SPY 强度 →', xf(100), H-6);
+  ctx.save(); ctx.translate(12, yf(100)); ctx.rotate(-Math.PI/2);
+  ctx.fillText('强度动量 →', 0, 0); ctx.restore();
+
+  // 画每只ETF：尾巴+当前点+标签
+  sectors.forEach(s => {
+    const xs = s.rrg_tail_x || [s.rrg_x];
+    const ys = s.rrg_tail_y || [s.rrg_y];
+    const q = s.rrg_quadrant || 'lagging';
+    const color = quadInfo[q]?.color || '#9ca3af';
+    // 尾巴
+    if (xs.length > 1) {
+      ctx.beginPath();
+      xs.forEach((x,i) => {
+        const X = xf(x), Y = yf(ys[i]);
+        if (i===0) ctx.moveTo(X, Y); else ctx.lineTo(X, Y);
+      });
+      ctx.strokeStyle = color; ctx.globalAlpha = 0.35; ctx.lineWidth = 1.5;
+      ctx.stroke(); ctx.globalAlpha = 1;
+    }
+    // 当前点
+    const cx = xf(s.rrg_x), cy = yf(s.rrg_y);
+    ctx.beginPath(); ctx.arc(cx, cy, 6, 0, Math.PI*2);
+    ctx.fillStyle = color; ctx.fill();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
+    // ticker 标签
+    ctx.font = '600 10px system-ui'; ctx.fillStyle = '#111827';
+    ctx.textAlign = 'left';
+    ctx.fillText(s.ticker, cx+9, cy+3);
+  });
+}
+
+// ── compact mode ─────────────────────────────────────────────────────────
+function renderCompact(data, toolbar) {
+  const wrap = document.getElementById('sectorHeatmapWrap');
+  const PHASE = {
+    accel_up:    {cls:'pb-accel-up',    txt:'加速↑'},
+    reversal_up: {cls:'pb-reversal-up', txt:'反转↑'},
+    cooling:     {cls:'pb-cooling',     txt:'减速'},
+    topping:     {cls:'pb-topping',     txt:'见顶↓'},
+    accel_dn:    {cls:'pb-accel-dn',    txt:'加速↓'},
+    stabilizing: {cls:'pb-stabilizing', txt:'企稳'},
+    neutral:     {cls:'pb-neutral',     txt:'—'},
+  };
+  let html = toolbar + '<div class="compact-list">';
+  data.sectors.forEach((s, i) => {
+    const p = PHASE[s.phase] || PHASE.neutral;
+    const c5C = (s.cum5||0)>=0?'pos':'neg';
+    const c20C = (s.cum20||0)>=0?'pos':'neg';
+    const c60C = (s.cum60||0)>=0?'pos':'neg';
+    html += `<div class="compact-row">
+      <div class="compact-meta">
+        <span class="compact-name">${esc(s.name)}</span>
+        <span class="compact-ticker">${esc(s.ticker)}</span>
+      </div>
+      <span class="phase-badge ${p.cls}">${p.txt}</span>
+      <span class="${c5C}" style="min-width:54px;text-align:right;font-weight:700;font-variant-numeric:tabular-nums">5日 ${(s.cum5||0)>0?'+':''}${s.cum5}%</span>
+      <span class="${c20C}" style="min-width:54px;text-align:right;font-variant-numeric:tabular-nums">20日 ${(s.cum20||0)>0?'+':''}${s.cum20}%</span>
+      <span class="${c60C}" style="min-width:54px;text-align:right;font-variant-numeric:tabular-nums">60日 ${(s.cum60||0)>0?'+':''}${s.cum60}%</span>
+      <canvas class="compact-spark" data-idx="${i}"></canvas>
+    </div>`;
+  });
+  html += '</div>';
+  wrap.innerHTML = html;
+  // 画 sparklines
+  setTimeout(()=>{
+    document.querySelectorAll('.compact-spark').forEach(c => {
+      const idx = parseInt(c.dataset.idx);
+      drawCompactSpark(c, data.sectors[idx].returns);
+    });
+  }, 20);
+}
+
+function drawCompactSpark(c, values) {
+  if (!values?.length) return;
+  const dpr = devicePixelRatio || 1;
+  const W = 120, H = 28;
+  c.width = W*dpr; c.height = H*dpr;
+  c.style.width = W+'px'; c.style.height = H+'px';
+  const ctx = c.getContext('2d'); ctx.scale(dpr, dpr);
+  // 累计净值
+  const cum = [1];
+  values.forEach(v => cum.push(cum[cum.length-1] * (1 + (v||0)/100)));
+  const mn = Math.min(...cum), mx = Math.max(...cum), rng = mx-mn||1;
+  const xf = i => i/(cum.length-1) * (W-4) + 2;
+  const yf = v => H - 2 - (v-mn)/rng * (H-4);
+  const up = cum[cum.length-1] >= cum[0];
+  ctx.beginPath();
+  cum.forEach((v,i)=>i===0?ctx.moveTo(xf(i),yf(v)):ctx.lineTo(xf(i),yf(v)));
+  ctx.strokeStyle = up ? '#16a34a' : '#dc2626';
+  ctx.lineWidth = 1.5; ctx.stroke();
+}
+
+let _heatmapViewMode = 'grid'; // 'grid' | 'rrg' | 'compact'
+function setHeatmapMode(m) {
+  _heatmapViewMode = m;
+  if (_heatmapCache[currentHeatmapKind]) renderSectorHeatmap(_heatmapCache[currentHeatmapKind]);
+}
+
 function renderSectorHeatmap(data) {
   const { sectors, dates } = data;
   const wrap = document.getElementById('sectorHeatmapWrap');
@@ -2043,14 +2297,30 @@ function renderSectorHeatmap(data) {
     neutral:     {cls:'pb-neutral',     txt:'—'},
   };
 
+  const modeLabels = {grid:'日历热力', rrg:'轮动象限', compact:'紧凑模式'};
   let h = '<div class="heatmap-toolbar">';
-  h += `<span style="font-weight:700;font-size:12px">${currentHeatmapKind==='themes'?'细分概念':'板块'}热力图 · 近60交易日</span>`;
+  h += `<span style="font-weight:700;font-size:12px">${currentHeatmapKind==='themes'?'细分概念':'板块'}视图</span>`;
   h += '<div class="kind-tabs">';
   h += `<button class="${currentHeatmapKind==='sectors'?'active':''}" onclick="switchHeatmapKind('sectors')">11大板块</button>`;
   h += `<button class="${currentHeatmapKind==='themes'?'active':''}" onclick="switchHeatmapKind('themes')">细分概念</button>`;
   h += '</div>';
-  h += '<span style="color:var(--text3);font-size:11px">按近5日收益排序 · 颜色饱和点±2.5% · hover查看精确值</span>';
+  h += '<div class="kind-tabs">';
+  ['grid','rrg','compact'].forEach(m=>{
+    h += `<button class="${_heatmapViewMode===m?'active':''}" onclick="setHeatmapMode('${m}')">${modeLabels[m]}</button>`;
+  });
   h += '</div>';
+  const desc = _heatmapViewMode==='rrg' ? '相对 SPY 的轮动象限 · 拖尾=最近8周轨迹'
+             : _heatmapViewMode==='compact' ? '每个板块一行：阶段标签+趋势+迷你走势'
+             : '按近5日收益排序 · 颜色饱和点±2.5%';
+  h += `<span style="color:var(--text3);font-size:11px">${desc}</span>`;
+  h += '</div>';
+
+  if (_heatmapViewMode === 'rrg') {
+    renderRRG(data, h); return;
+  }
+  if (_heatmapViewMode === 'compact') {
+    renderCompact(data, h); return;
+  }
 
   h += '<div class="heatmap-wrap" style="overflow:auto;max-height:calc(100vh - 220px)">';
   h += '<table class="heatmap-table"><thead><tr>';

@@ -1020,11 +1020,68 @@ def api_sector_heatmap():
         return jsonify(cache["data"])
     try:
         data = _compute_heatmap(etf_list)
+        # 计算 RRG 坐标
+        data = _add_rrg_coords(data, etf_list)
         cache["ts"] = now
         cache["data"] = data
         return jsonify(data)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+def _add_rrg_coords(data, etf_list):
+    """计算每个板块相对 SPY 的 RRG 坐标
+    X 轴 (RS-Ratio):  最近14日相对 SPY 强度，100 = 持平
+    Y 轴 (RS-Mom):   RS-Ratio 的 5日动量，100 = 强度无变化
+    四象限：
+      X>100 Y>100: 领涨 (Leading)
+      X<100 Y>100: 改善 (Improving)
+      X<100 Y<100: 落后 (Lagging)
+      X>100 Y<100: 走弱 (Weakening)
+    历史轨迹保留最近 8 周用于绘制尾巴
+    """
+    import yfinance as yf, pandas as pd, numpy as np
+    try:
+        today = pd.Timestamp.today()
+        start = (today - pd.DateOffset(days=180)).strftime("%Y-%m-%d")
+        tickers = [e[0] for e in etf_list] + ["SPY"]
+        raw = yf.download(tickers, start=start, auto_adjust=True, progress=False)
+        close = raw["Close"] if "Close" in raw.columns else raw
+        if "SPY" not in close.columns:
+            return data
+        spy = close["SPY"].dropna()
+
+        # 对每只 ETF：rs = (price/spy) / rolling_mean(14)
+        for sec in data.get("sectors", []):
+            tk = sec["ticker"]
+            if tk not in close.columns: continue
+            s = close[tk].dropna()
+            common = s.index.intersection(spy.index)
+            if len(common) < 30: continue
+            rs_raw = (s.loc[common] / spy.loc[common])
+            # 归一化为100基准（相对 14 日均值）
+            rs_norm = (rs_raw / rs_raw.rolling(14).mean()) * 100
+            rs_mom = (rs_norm / rs_norm.shift(5)) * 100   # 5日动量
+            rs_norm = rs_norm.dropna()
+            rs_mom  = rs_mom.dropna()
+            if len(rs_norm) < 2 or len(rs_mom) < 2: continue
+
+            # 取最近 8 个数据点作为尾巴（约 8 周）
+            tail_n = 8
+            xs = rs_norm.tail(tail_n).tolist()
+            ys = rs_mom.tail(tail_n).tolist()
+            sec["rrg_x"] = round(float(xs[-1]), 2)
+            sec["rrg_y"] = round(float(ys[-1]), 2)
+            sec["rrg_tail_x"] = [round(float(v), 2) for v in xs]
+            sec["rrg_tail_y"] = [round(float(v), 2) for v in ys]
+            # 象限
+            if sec["rrg_x"] >= 100 and sec["rrg_y"] >= 100:   q = "leading"
+            elif sec["rrg_x"] < 100 and sec["rrg_y"] >= 100:  q = "improving"
+            elif sec["rrg_x"] < 100 and sec["rrg_y"] < 100:   q = "lagging"
+            else:                                              q = "weakening"
+            sec["rrg_quadrant"] = q
+    except Exception as e:
+        log(f"RRG 计算失败：{e}", -1)
+    return data
 
 
 # ─── 策略 7：52周新高动量（George & Hwang 2004, JoF）───────────────────────────
@@ -1114,29 +1171,36 @@ def calc_connors_rsi(prices, meta, start_str, end_str):
         last_rsi2  = float(rsi2.iloc[-1])  if not pd.isna(rsi2.iloc[-1])  else None
         last_rsi14 = float(rsi14.iloc[-1]) if not pd.isna(rsi14.iloc[-1]) else None
 
-        # Connors 标准信号：200日均线上 + RSI(2) < 5
-        signal = bool(above_ma200 and last_rsi2 is not None and last_rsi2 < 5)
-        # 观察名单：RSI(2) < 10
+        # 多周期确认：周线 RSI(14) > 50 说明大方向仍是涨
+        # 周线 = 每5个交易日取一个点（近似周收盘）
+        weekly = s.iloc[::-1].iloc[::5].iloc[::-1]
+        weekly_rsi14 = _rsi(weekly, 14)
+        last_w_rsi = float(weekly_rsi14.iloc[-1]) if len(weekly_rsi14) and not pd.isna(weekly_rsi14.iloc[-1]) else None
+        weekly_bullish = last_w_rsi is not None and last_w_rsi > 50
+
+        # Connors 标准信号：200日均线上 + RSI(2)<5 + 周线方向向上
+        signal = bool(above_ma200 and weekly_bullish and last_rsi2 is not None and last_rsi2 < 5)
+        # 观察名单：信号条件放宽
         watchlist = bool(above_ma200 and last_rsi2 is not None and last_rsi2 < 10)
 
-        # 距 200日均线（%）— 用来评估趋势强度
         from_ma200 = round((last/ma200 - 1)*100, 2)
 
         results.append({
             **_meta_info(meta_idx, ticker), "ticker": ticker,
-            "price":       round(last, 2),
-            "rsi2":        round(last_rsi2, 1)  if last_rsi2  is not None else None,
-            "rsi14":       round(last_rsi14, 1) if last_rsi14 is not None else None,
-            "ma5":         round(ma5, 2),
-            "ma200":       round(ma200, 2),
-            "from_ma200":  from_ma200,
-            "above_ma200": above_ma200,
-            "signal":      signal,
-            "watchlist":   watchlist,
+            "price":         round(last, 2),
+            "rsi2":          round(last_rsi2, 1)  if last_rsi2  is not None else None,
+            "rsi14":         round(last_rsi14, 1) if last_rsi14 is not None else None,
+            "weekly_rsi":    round(last_w_rsi, 1) if last_w_rsi is not None else None,
+            "weekly_bullish":weekly_bullish,
+            "ma5":           round(ma5, 2),
+            "ma200":         round(ma200, 2),
+            "from_ma200":    from_ma200,
+            "above_ma200":   above_ma200,
+            "signal":        signal,
+            "watchlist":     watchlist,
         })
 
     df = pd.DataFrame(results)
-    # 排序：signal 优先 → watchlist → 其它；同一档内按 rsi2 升序（越超卖越前）
     def _bucket(r):
         if r["signal"]:    return 2
         if r["watchlist"]: return 1
@@ -1533,10 +1597,13 @@ def api_run():
 _backtest_cache: dict = {}   # key -> (ts, result)
 _BACKTEST_TTL = 6 * 3600
 
-def _run_backtest(strategy_key, universe, sector_filter, lookback_months, hold_n=10):
-    """走前向回测 — 每月初按策略选前 N 只持有一个月"""
+def _run_backtest(strategy_key, universe, sector_filter, lookback_months, hold_n=10, cost_bps=10):
+    """走前向回测 — 每月初按策略选前 N 只持有一个月
+    cost_bps: 每次换仓的双边交易成本（bps，含滑点）。10 bps = 0.1% per turnover
+    """
     import pandas as pd, numpy as np, yfinance as yf
-    log(f"回测准备：{strategy_key} · 回看 {lookback_months} 月", 5)
+    log(f"回测准备：{strategy_key} · 回看 {lookback_months} 月 · 成本 {cost_bps}bps", 5)
+    cost_rate = cost_bps / 10000.0
 
     # 1. 建股票池
     meta = build_universe(universe, sector_filter)
@@ -1611,8 +1678,10 @@ def _run_backtest(strategy_key, universe, sector_filter, lookback_months, hold_n
             if r > 0: wins += 1
             else:    losses += 1
         if cnt > 0: port_ret /= cnt
+        # 扣除换仓成本（每月100%换仓，每只买+卖各一次 = 双边）
+        port_ret -= cost_rate * 2  # buy + sell
 
-        # SPY 期间收益
+        # SPY 期间收益（基准也扣一次单边成本作为公平对比）
         try:
             sp0 = float(spy.asof(sig_end))
             sp1 = float(spy.asof(hold_end))
@@ -1653,6 +1722,7 @@ def _run_backtest(strategy_key, universe, sector_filter, lookback_months, hold_n
         "strategy":   strategy_key,
         "lookback":   lookback_months,
         "hold_n":     hold_n,
+        "cost_bps":   cost_bps,
         "dates":      dates,
         "equity":     [round(float(v), 4) for v in arr_eq],
         "bench":      [round(float(v), 4) for v in bench],
@@ -1681,7 +1751,8 @@ def api_backtest():
     sector_filter = body.get("sector_filter", "")
     lookback = int(body.get("lookback_months", 24))
     hold_n   = int(body.get("hold_n", 10))
-    cache_key = f"{strategy}|{universe}|{sector_filter}|{lookback}|{hold_n}"
+    cost_bps = int(body.get("cost_bps", 10))
+    cache_key = f"{strategy}|{universe}|{sector_filter}|{lookback}|{hold_n}|{cost_bps}"
     import time as _t
     entry = _backtest_cache.get(cache_key)
     if entry and _t.time() - entry[0] < _BACKTEST_TTL:
@@ -1689,7 +1760,7 @@ def api_backtest():
 
     def worker():
         try:
-            result = _run_backtest(strategy, universe, sector_filter, lookback, hold_n)
+            result = _run_backtest(strategy, universe, sector_filter, lookback, hold_n, cost_bps)
             _backtest_cache[cache_key] = (_t.time(), result)
             _broadcast("backtest_done", result)
         except Exception as e:
