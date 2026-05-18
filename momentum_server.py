@@ -184,7 +184,7 @@ def _meta_info(meta_idx, ticker):
 
 # ─── 策略 1：纯动量 ────────────────────────────────────────────────────────────
 
-def calc_momentum(prices, meta, start_str, end_str):
+def calc_momentum(prices, meta, start_str, end_str, _skip_external=False):
     import pandas as pd
     meta_idx = meta.set_index("Ticker")
     price_stats, total = {}, len(prices.columns)
@@ -194,15 +194,22 @@ def calc_momentum(prices, meta, start_str, end_str):
         if ps: price_stats[ticker] = ps
 
     valid = list(price_stats.keys())
-    FIELDS = ["shortPercentOfFloat","institutionsPercentHeld"]
-    fundamentals = _parallel_info(valid, FIELDS, "基本面", 81, 96, workers=20)
 
-    results = []
-    for t in valid:
-        fs = fundamentals.get(t, {})
-        sf = round(fs["shortPercentOfFloat"]*100,1)    if fs.get("shortPercentOfFloat")    is not None else None
-        ih = round(fs["institutionsPercentHeld"]*100,1) if fs.get("institutionsPercentHeld") is not None else None
-        results.append({**_meta_info(meta_idx, t), "ticker": t, **price_stats[t], "short_float": sf, "inst_hold": ih})
+    if _skip_external:
+        # 回测模式：不拉 yfinance.info（避免 lookahead bias + 大量 IO）
+        results = []
+        for t in valid:
+            results.append({**_meta_info(meta_idx, t), "ticker": t, **price_stats[t],
+                           "short_float": None, "inst_hold": None})
+    else:
+        FIELDS = ["shortPercentOfFloat","institutionsPercentHeld"]
+        fundamentals = _parallel_info(valid, FIELDS, "基本面", 81, 96, workers=20)
+        results = []
+        for t in valid:
+            fs = fundamentals.get(t, {})
+            sf = round(fs["shortPercentOfFloat"]*100,1)    if fs.get("shortPercentOfFloat")    is not None else None
+            ih = round(fs["institutionsPercentHeld"]*100,1) if fs.get("institutionsPercentHeld") is not None else None
+            results.append({**_meta_info(meta_idx, t), "ticker": t, **price_stats[t], "short_float": sf, "inst_hold": ih})
 
     df = pd.DataFrame(results).sort_values("mom_mean", ascending=False).reset_index(drop=True)
     df.insert(0,"rank",range(1,len(df)+1))
@@ -259,7 +266,7 @@ def _parallel_info(tickers, fields, log_prefix, pct_start, pct_end, workers=20):
                 pass
     return results
 
-def calc_momentum_quality(prices, meta, start_str, end_str):
+def calc_momentum_quality(prices, meta, start_str, end_str, _skip_external=False):
     import pandas as pd, numpy as np
     meta_idx = meta.set_index("Ticker")
 
@@ -271,6 +278,18 @@ def calc_momentum_quality(prices, meta, start_str, end_str):
         if ps: price_stats[t] = ps
 
     valid = list(price_stats.keys())
+
+    if _skip_external:
+        # 回测模式：跳过基本面（避免 lookahead bias），仅按动量排序
+        rows = [{**_meta_info(meta_idx, t), "ticker": t, **price_stats[t],
+                 "roe": None, "profit_margin": None, "short_float": None, "inst_hold": None}
+                for t in valid]
+        df = pd.DataFrame(rows).sort_values("mom_mean", ascending=False).reset_index(drop=True)
+        df.insert(0,"rank",range(1,len(df)+1))
+        df["composite"] = None
+        log("计算完成", 100)
+        return df
+
     FIELDS = ["returnOnEquity", "profitMargins", "shortPercentOfFloat", "institutionsPercentHeld"]
     fundamentals = _parallel_info(valid, FIELDS, "基本面", 71, 95, workers=20)
 
@@ -297,13 +316,23 @@ def calc_momentum_quality(prices, meta, start_str, end_str):
 
 # ─── 策略 3：低波动率 ──────────────────────────────────────────────────────────
 
-def calc_low_vol(prices, meta, start_str, end_str):
-    import pandas as pd, numpy as np, yfinance as yf
+def calc_low_vol(prices, meta, start_str, end_str, _skip_external=False, _spy_series=None):
+    import pandas as pd, numpy as np
     meta_idx = meta.set_index("Ticker")
 
-    log("下载 SPY 基准…", 58)
-    spy_raw = yf.download("SPY", start=start_str, end=end_str, auto_adjust=True, progress=False)
-    spy_ret = spy_raw["Close"].pct_change().dropna() if not spy_raw.empty else pd.Series(dtype=float)
+    if _spy_series is not None:
+        # 回测/对比：复用已加载的 SPY
+        spy_filt = _spy_series[(_spy_series.index >= pd.Timestamp(start_str)) &
+                               (_spy_series.index <= pd.Timestamp(end_str))]
+        spy_ret = spy_filt.pct_change().dropna()
+    elif _skip_external:
+        # 完全跳过基准：beta 留空，仅用 ann_vol 排序
+        spy_ret = pd.Series(dtype=float)
+    else:
+        import yfinance as yf
+        log("下载 SPY 基准…", 58)
+        spy_raw = yf.download("SPY", start=start_str, end=end_str, auto_adjust=True, progress=False)
+        spy_ret = spy_raw["Close"].pct_change().dropna() if not spy_raw.empty else pd.Series(dtype=float)
 
     results, total = [], len(prices.columns)
     for idx, ticker in enumerate(prices.columns):
@@ -423,11 +452,34 @@ def _piotroski_one(ticker):
         _cache_set_pio(ticker, None, {})
         return ticker, None, {}
 
-def calc_piotroski(prices, meta, start_str, end_str):
+def calc_piotroski(prices, meta, start_str, end_str, _skip_external=False):
     import pandas as pd
     meta_idx = meta.set_index("Ticker")
     tickers  = list(prices.columns)
     total    = len(tickers)
+
+    if _skip_external:
+        # 回测模式：财务数据是 point-in-time 强依赖，无法历史回测
+        # 退化为按总收益排序（仅作占位，不视作真实 F-Score 策略）
+        results = []
+        for ticker in tickers:
+            s = prices[ticker].dropna()
+            if s.empty: continue
+            monthly = prices[ticker].resample("ME").last().dropna()
+            total_ret = round(float(monthly.iloc[-1]/monthly.iloc[0]-1)*100,2) if len(monthly)>=2 else None
+            results.append({
+                **_meta_info(meta_idx, ticker), "ticker": ticker,
+                "price":        round(float(s.iloc[-1]),2),
+                "fscore":       None, "f_profit": None, "f_leverage": None,
+                "f_efficiency": None, "roa": None, "gross_margin": None,
+                "total_ret":    total_ret,
+            })
+        df = pd.DataFrame(results)
+        df = df.sort_values("total_ret", ascending=False, na_position="last").reset_index(drop=True)
+        df.insert(0,"rank",range(1,len(df)+1))
+        log("计算完成（回测降级模式）", 100)
+        return df
+
     log(f"获取财务报表（{total} 只，并行中…）", 58)
 
     pio_data = {}
@@ -490,21 +542,25 @@ def resolve_dates(start_ym, end_ym, months):
 # 第二层：剩余股票按相对动量排序
 # 无风险利率用 ^IRX（13周国库券年化收益率）近似
 
-def calc_dual_momentum(prices, meta, start_str, end_str):
-    import pandas as pd, numpy as np, yfinance as yf
+def calc_dual_momentum(prices, meta, start_str, end_str, _skip_external=False):
+    import pandas as pd, numpy as np
 
     meta_idx = meta.set_index("Ticker")
 
-    # 拉取无风险利率（^IRX = 13-week T-bill annualized %）
-    log("获取无风险利率（^IRX）…", 58)
-    try:
-        irx = yf.download("^IRX", start=start_str, end=end_str,
-                          auto_adjust=True, progress=False)["Close"].dropna()
-        # IRX 是年化百分比，换算到区间总收益率
+    if _skip_external:
+        # 回测：用 2% 年化兜底（避免每月拉 ^IRX）
         days = (pd.Timestamp(end_str) - pd.Timestamp(start_str)).days or 1
-        rf_total = float(irx.mean()) / 100 * days / 365
-    except Exception:
-        rf_total = 0.02  # 无法拉取时用 2% 兜底
+        rf_total = 0.02 * days / 365
+    else:
+        import yfinance as yf
+        log("获取无风险利率（^IRX）…", 58)
+        try:
+            irx = yf.download("^IRX", start=start_str, end=end_str,
+                              auto_adjust=True, progress=False)["Close"].dropna()
+            days = (pd.Timestamp(end_str) - pd.Timestamp(start_str)).days or 1
+            rf_total = float(irx.mean()) / 100 * days / 365
+        except Exception:
+            rf_total = 0.02
 
     log(f"无风险利率（区间累计）= {rf_total*100:.2f}%，计算双动量…", 62)
 
@@ -541,7 +597,7 @@ def calc_dual_momentum(prices, meta, start_str, end_str):
 
 # ─── 策略 6：多因子 Z-Score 合成 ──────────────────────────────────────────────
 
-def calc_multifactor(prices, meta, start_str, end_str):
+def calc_multifactor(prices, meta, start_str, end_str, _skip_external=False):
     import pandas as pd, numpy as np
 
     meta_idx = meta.set_index("Ticker")
@@ -557,6 +613,28 @@ def calc_multifactor(prices, meta, start_str, end_str):
         price_stats[t] = {**ps, "ann_vol": round(float(dr.std()*np.sqrt(252)*100), 2)}
 
     valid  = list(price_stats.keys())
+
+    if _skip_external:
+        # 回测：用价格动量 + 波动率合成 Z-Score（无基本面）
+        rows = [{**_meta_info(meta_idx, t), "ticker": t, **price_stats[t],
+                 "roe": None, "profit_margin": None, "ps": None, "beta": None,
+                 "short_float": None, "inst_hold": None}
+                for t in valid]
+        df = pd.DataFrame(rows)
+        def zscore_local(col, invert=False):
+            s = df[col].dropna()
+            if len(s) < 2: return pd.Series(0.0, index=df.index)
+            mu, sd = s.mean(), s.std()
+            if sd < 1e-9: return pd.Series(0.0, index=df.index)
+            z = (df[col] - mu) / sd
+            return (-z if invert else z).fillna(0)
+        # 回测专用合成：动量60% + 低波动40%
+        df["mf_score"] = (0.6 * zscore_local("mom_mean") + 0.4 * zscore_local("ann_vol", invert=True)).round(3)
+        df = df.sort_values("mf_score", ascending=False).reset_index(drop=True)
+        df.insert(0,"rank",range(1,len(df)+1))
+        log("计算完成", 100)
+        return df
+
     FIELDS = ["returnOnEquity","profitMargins","priceToSalesTrailing12Months","beta","shortPercentOfFloat","institutionsPercentHeld"]
     fundamentals = _parallel_info(valid, FIELDS, "基本面", 71, 95, workers=20)
 
@@ -1088,7 +1166,7 @@ def _add_rrg_coords(data, etf_list):
 # 距离52周高点的接近度本身就是动量信号，比传统动量更稳定
 # 规则：dist_52w_high < 5% → 强势；同时要求 200日均线之上 + 正向月动量
 
-def calc_52w_high(prices, meta, start_str, end_str):
+def calc_52w_high(prices, meta, start_str, end_str, _skip_external=False):
     import pandas as pd, numpy as np
     meta_idx = meta.set_index("Ticker")
 
@@ -1151,7 +1229,7 @@ def _rsi(series, n):
     rs = avg_up / avg_dn.replace(0, 1e-12)
     return 100 - 100/(1+rs)
 
-def calc_connors_rsi(prices, meta, start_str, end_str):
+def calc_connors_rsi(prices, meta, start_str, end_str, _skip_external=False):
     import pandas as pd, numpy as np
     meta_idx = meta.set_index("Ticker")
 
@@ -1667,9 +1745,15 @@ def _run_backtest(strategy_key, universe, sector_filter, lookback_months, hold_n
             dates.append(str(hold_end.date()))
             continue
 
-        # 跑策略
+        # 跑策略（回测模式：跳过 yfinance.info 等外部调用，避免 lookahead + 大量 IO）
         try:
-            df_rank = fn(prices_sig, meta, sig_start.strftime("%Y-%m-%d"), sig_end.strftime("%Y-%m-%d"))
+            sig_start_s = sig_start.strftime("%Y-%m-%d")
+            sig_end_s   = sig_end.strftime("%Y-%m-%d")
+            if strategy_key == "low_vol":
+                # low_vol 复用预加载的 SPY 切片，比 _skip_external 更准确
+                df_rank = fn(prices_sig, meta, sig_start_s, sig_end_s, _skip_external=True, _spy_series=spy)
+            else:
+                df_rank = fn(prices_sig, meta, sig_start_s, sig_end_s, _skip_external=True)
         except Exception:
             df_rank = None
         if df_rank is None or df_rank.empty:
