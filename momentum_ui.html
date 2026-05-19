@@ -404,6 +404,17 @@ tr.selected td:first-child{border-left:2px solid var(--accent);padding-left:10px
 .bt-cmp-table .pill-mid  {background:rgba(217,119,6,.1);color:#b45309}
 .bt-cmp-table .pill-long {background:rgba(22,163,74,.1);color:#15803d}
 .bt-cmp-chart{background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:10px;height:320px;position:relative;margin-top:10px}
+.score-radar{background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:10px;position:relative;height:240px;display:flex;align-items:center;justify-content:center}
+.score-radar canvas{display:block;max-width:100%}
+.score-summary{display:grid;grid-template-columns:repeat(5,1fr);gap:4px;margin-top:8px}
+.score-dim{background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:6px 4px;text-align:center}
+.score-dim-lbl{font-size:9px;color:var(--text3);font-weight:700;letter-spacing:.02em;text-transform:uppercase}
+.score-dim-val{font-size:14px;font-weight:800;font-variant-numeric:tabular-nums;margin-top:1px}
+.score-dim-val.g{color:var(--green)}.score-dim-val.a{color:var(--amber)}.score-dim-val.r{color:var(--red)}
+.score-total-big{display:flex;align-items:center;gap:14px;padding:12px 14px;background:linear-gradient(135deg,rgba(37,99,235,.05),transparent);border:1px solid var(--border);border-radius:6px}
+.score-total-big .ring{width:62px;height:62px;border-radius:50%;display:flex;flex-direction:column;align-items:center;justify-content:center;border:5px solid;flex-shrink:0}
+.score-total-big .num{font-size:22px;font-weight:900;font-variant-numeric:tabular-nums;line-height:1}
+.score-total-big .sub{font-size:9px;color:var(--text3);margin-top:1px}
 .bt-cmp-progress{display:flex;align-items:center;gap:8px;padding:8px;color:var(--text2);font-size:12px}
 .bt-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
 .bt-stat{background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:9px 11px}
@@ -701,42 +712,42 @@ const STRAT_META = {
   momentum: {
     desc: "月度收益率算术均值，捕捉持续上涨趋势；适合趋势明确的牛市行情",
     sortKey: "mom_mean", sortAsc: false,
-    cols: ["rank","ticker","sector","price","mom_mean","total_ret","sharpe","max_dd","short_float","inst_hold","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
+    cols: ["rank","score_total","ticker","sector","price","mom_mean","total_ret","sharpe","max_dd","short_float","inst_hold","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
   },
   momentum_quality: {
     desc: "动量(50%) + ROE(30%) + 净利润率(20%) 综合打分，过滤基本面差的动量股",
     sortKey: "composite", sortAsc: false,
-    cols: ["rank","ticker","sector","price","composite","mom_mean","roe","profit_margin","max_dd","short_float","inst_hold","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
+    cols: ["rank","score_total","ticker","sector","price","composite","mom_mean","roe","profit_margin","max_dd","short_float","inst_hold","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
   },
   low_vol: {
     desc: "以 Beta 和年化波动率升序排列，优先低风险品种；适合震荡市或防御配置",
     sortKey: "beta", sortAsc: true,
-    cols: ["rank","ticker","sector","price","beta","ann_vol","total_ret","mom_mean","max_dd","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
+    cols: ["rank","score_total","ticker","sector","price","beta","ann_vol","total_ret","mom_mean","max_dd","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
   },
   piotroski: {
     desc: "Piotroski F-Score：9项财务健康指标（盈利/杠杆/效率各3项），满分9分",
     sortKey: "fscore", sortAsc: false,
-    cols: ["rank","ticker","sector","price","fscore","f_profit","f_leverage","f_efficiency","roa","gross_margin","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
+    cols: ["rank","score_total","ticker","sector","price","fscore","f_profit","f_leverage","f_efficiency","roa","gross_margin","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
   },
   dual_momentum: {
     desc: "两层过滤：① 绝对动量 — 总收益 > 3M国债收益率，不过线的排到末尾；② 剩余按相对动量排序",
     sortKey: "mom_mean", sortAsc: false,
-    cols: ["rank","ticker","sector","price","abs_pass","mom_mean","rf_hurdle","total_ret","sharpe","max_dd","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
+    cols: ["rank","score_total","ticker","sector","price","abs_pass","mom_mean","rf_hurdle","total_ret","sharpe","max_dd","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
   },
   multifactor: {
     desc: "多因子 Z-Score 合成：动量35% + ROE25% + 净利润率15% + 低Beta15% + 低PS10%",
     sortKey: "mf_score", sortAsc: false,
-    cols: ["rank","ticker","sector","price","mf_score","mom_mean","roe","profit_margin","beta","ps","short_float","inst_hold","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
+    cols: ["rank","score_total","ticker","sector","price","mf_score","mom_mean","roe","profit_margin","beta","ps","short_float","inst_hold","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
   },
   high52w: {
     desc: "George & Hwang 2004（JoF）：距52周高点越近的股票未来半年至一年持续走强；双重过滤=200日均线之上+正向月动量",
     sortKey: "dist_high", sortAsc: false,
-    cols: ["rank","ticker","sector","price","dist_high","passed","high_52w","from_low","above_ma200","mom_mean","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
+    cols: ["rank","score_total","ticker","sector","price","dist_high","passed","high_52w","from_low","above_ma200","mom_mean","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
   },
   connors_rsi: {
     desc: "Larry Connors 多周期短线：日线 RSI(2)<5 + 周线 RSI(14)>50（趋势仍向上）+ 200日均线之上 → 买入信号，反弹至 MA5 卖出",
     sortKey: "rsi2", sortAsc: true,
-    cols: ["rank","ticker","sector","price","signal","rsi2","rsi14","weekly_rsi","weekly_bullish","from_ma200","ma5","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
+    cols: ["rank","score_total","ticker","sector","price","signal","rsi2","rsi14","weekly_rsi","weekly_bullish","from_ma200","ma5","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
   },
 };
 
@@ -855,6 +866,27 @@ const COL_DEF = {
     if(v==null) return '—';
     if(r.low_liq) return `<span class="liq-low">$${v}M ⚠ 低流动</span>`;
     return `<span class="liq-ok">$${v}M</span>`;
+  }},
+  // 多维评分（仅 top 20）
+  score_total:  { label:'综合评分',     fmt:(v,r)=>{
+    if(v==null) return '<span class="neu">—</span>';
+    const c = v>=70?'#15803d':v>=50?'#d97706':'#b91c1c';
+    const bg = v>=70?'rgba(22,163,74,.10)':v>=50?'rgba(217,119,6,.10)':'rgba(220,38,38,.08)';
+    return `<div style="display:flex;align-items:center;gap:6px">
+      <span style="background:${bg};color:${c};font-weight:800;padding:3px 8px;border-radius:4px;font-size:13px;font-variant-numeric:tabular-nums">${v}</span>
+      <div style="display:flex;gap:1px;flex:1;max-width:60px">
+        ${[r.score_logic, r.score_fundamental, r.score_management, r.score_news, r.score_technical].map(s=>{
+          const h = (s||0) * 0.25;
+          const sc = (s||0)>=70?'var(--green)':(s||0)>=50?'var(--amber)':'var(--red)';
+          return `<div style="width:9px;height:25px;background:var(--surface2);border-radius:1px;position:relative;overflow:hidden"><div style="position:absolute;bottom:0;width:100%;height:${h}%;background:${sc}"></div></div>`;
+        }).join('')}
+      </div>
+    </div>`;
+  }},
+  news_count_14d:{ label:'新闻(14d)', fmt:(v)=>{
+    if(v==null) return '—';
+    const c = v>=8?'pos':v>=3?'neu':'';
+    return `<span class="num ${c}">${v}</span>`;
   }},
 };
 
@@ -2127,6 +2159,41 @@ function renderDetail({info,prices}, row) {
 
   // universal target / stop card (only present for top-10 rows)
   let targetCard='';
+  // 多维���分卡（top20 才有）
+  let scoreCard = '';
+  if (row.score_total != null) {
+    const tot = row.score_total;
+    const ringC = tot>=70?'var(--green)':tot>=50?'var(--amber)':'var(--red)';
+    const dims = [
+      ['逻辑',   row.score_logic],
+      ['基本面', row.score_fundamental],
+      ['股东',   row.score_management],
+      ['资讯',   row.score_news],
+      ['技术面', row.score_technical],
+    ];
+    const tier = tot>=70?'强烈推荐':tot>=55?'值得关注':tot>=40?'平淡':'风险偏高';
+    scoreCard = `
+      <div class="sec-head">多维评分 · 当前策略 #${row.rank}</div>
+      <div class="score-total-big">
+        <div class="ring" style="border-color:${ringC}">
+          <span class="num" style="color:${ringC}">${tot}</span>
+          <span class="sub">/ 100</span>
+        </div>
+        <div>
+          <div style="font-size:14px;font-weight:800;color:${ringC}">${tier}</div>
+          <div style="font-size:11px;color:var(--text3);margin-top:3px">5 维加权评分（逻辑30%·基本面25%·技术面20%·股东15%·资讯10%）</div>
+        </div>
+      </div>
+      <div class="score-radar"><canvas id="rdr-${row.ticker}"></canvas></div>
+      <div class="score-summary">
+        ${dims.map(([n,v])=>{
+          const c = (v||0)>=70?'g':(v||0)>=50?'a':'r';
+          return `<div class="score-dim"><div class="score-dim-lbl">${n}</div><div class="score-dim-val ${c}">${v??'—'}</div></div>`;
+        }).join('')}
+      </div>
+      ${row.news_count_14d != null ? `<div style="font-size:11px;color:var(--text3);text-align:right;margin-top:4px">近14日新闻 <b style="color:var(--text2)">${row.news_count_14d}</b> 条</div>` : ''}`;
+  }
+
   if (row.target!=null && row.stop!=null) {
     const price = row.price;
     const stop = row.stop, target = row.target;
@@ -2292,6 +2359,7 @@ function renderDetail({info,prices}, row) {
       <div class="chart-box"><canvas id="${cid}"></canvas>
         <div class="ld-wrap show" id="cl"><div class="spinner"></div></div></div>
     </div>
+    ${scoreCard?`<div>${scoreCard}</div>`:''}
     ${targetCard?`<div>${targetCard}</div>`:''}
     <div>
       <div class="sec-head">${STRAT_META[strategy].desc.split('；')[0].slice(0,20)}…</div>
@@ -2343,12 +2411,101 @@ function renderDetail({info,prices}, row) {
   drawChart(cid, prices, document.getElementById('cl'));
   // 自动算一次仓位
   setTimeout(()=>{ if(row.ticker && row.stop!=null) computeSize(row.ticker); }, 100);
+  // 画雷达图
+  if (row.score_total != null) {
+    setTimeout(()=>drawRadar('rdr-'+row.ticker, [
+      ['逻辑', row.score_logic],
+      ['基本面', row.score_fundamental],
+      ['股东', row.score_management],
+      ['资讯', row.score_news],
+      ['技术面', row.score_technical],
+    ]), 50);
+  }
 }
 
 function kv(label,val,raw,colorize){
   let style='';
   if(colorize&&raw!=null) style=`style="color:${raw>0?'var(--green)':'var(--red)'}"`;
   return `<div class="kv"><span class="k">${label}</span><span class="v" ${style}>${val}</span></div>`;
+}
+
+// ── radar chart ──────────────────────────────────────────────────────────────
+function drawRadar(canvasId, dims) {
+  const c = document.getElementById(canvasId);
+  if (!c) return;
+  const dpr = devicePixelRatio || 1;
+  const W = Math.min(c.parentElement.clientWidth - 20, 320);
+  const H = 220;
+  c.width = W*dpr; c.height = H*dpr;
+  c.style.width = W+'px'; c.style.height = H+'px';
+  const ctx = c.getContext('2d'); ctx.scale(dpr, dpr);
+
+  const cx = W / 2, cy = H / 2;
+  const radius = Math.min(W, H) / 2 - 30;
+  const n = dims.length;
+
+  // grid rings: 25 / 50 / 75 / 100
+  ctx.strokeStyle = '#e4e7ec'; ctx.lineWidth = 1;
+  [0.25, 0.5, 0.75, 1].forEach(scale => {
+    ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const angle = -Math.PI/2 + i * 2 * Math.PI / n;
+      const x = cx + Math.cos(angle) * radius * scale;
+      const y = cy + Math.sin(angle) * radius * scale;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.closePath(); ctx.stroke();
+  });
+  // axes
+  ctx.strokeStyle = '#e4e7ec';
+  for (let i = 0; i < n; i++) {
+    const angle = -Math.PI/2 + i * 2 * Math.PI / n;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + Math.cos(angle) * radius, cy + Math.sin(angle) * radius);
+    ctx.stroke();
+  }
+  // labels
+  ctx.fillStyle = '#6b7280'; ctx.font = '600 11px system-ui';
+  for (let i = 0; i < n; i++) {
+    const angle = -Math.PI/2 + i * 2 * Math.PI / n;
+    const x = cx + Math.cos(angle) * (radius + 16);
+    const y = cy + Math.sin(angle) * (radius + 16);
+    ctx.textAlign = Math.abs(Math.cos(angle)) < 0.1 ? 'center'
+                  : Math.cos(angle) > 0 ? 'left' : 'right';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(dims[i][0], x, y);
+  }
+  // polygon
+  ctx.beginPath();
+  for (let i = 0; i < n; i++) {
+    const angle = -Math.PI/2 + i * 2 * Math.PI / n;
+    const v = (dims[i][1] || 0) / 100;
+    const x = cx + Math.cos(angle) * radius * v;
+    const y = cy + Math.sin(angle) * radius * v;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(37,99,235,.18)';
+  ctx.strokeStyle = '#2563eb';
+  ctx.lineWidth = 2;
+  ctx.fill(); ctx.stroke();
+  // points
+  for (let i = 0; i < n; i++) {
+    const angle = -Math.PI/2 + i * 2 * Math.PI / n;
+    const v = (dims[i][1] || 0) / 100;
+    const x = cx + Math.cos(angle) * radius * v;
+    const y = cy + Math.sin(angle) * radius * v;
+    ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI*2);
+    ctx.fillStyle = '#2563eb'; ctx.fill();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
+    // numeric labels
+    ctx.fillStyle = '#111827'; ctx.font = '700 10px system-ui';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    const lx = cx + Math.cos(angle) * radius * v * 0.7;
+    const ly = cy + Math.sin(angle) * radius * v * 0.7;
+    // skip middle labels if too crowded (only first/last)
+  }
 }
 
 // ── chart ─────────────────────────────────────────────────────────────────────

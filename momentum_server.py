@@ -1594,6 +1594,200 @@ def _diagnose_top10(df, prices):
         "warnings":     warnings_list,
     }
 
+# ─── Top 20 多维评分 ─────────────────────────────────────────────────────────
+# 5 个维度（0-100）：
+#   logic      策略排名：top1=100, top20=5（线性）
+#   fundamental ROE + 利润率 + 增长率 + 负债率
+#   management 机构持仓 + 内部持股 + 分析师评级 + 覆盖度
+#   news       近 14 日新闻数 + 近 5 日动量 + 距分析师目标价上行空间
+#   technical  距 200 日均线 + 距 52W 高点 + RSI(14) 健康度
+
+def _fetch_news_count(ticker, days=14):
+    """近 days 天新闻数（yfinance.news 实时返回，无缓存）"""
+    try:
+        import yfinance as yf, time as _t
+        result = [0]
+        def _do():
+            try:
+                news = yf.Ticker(ticker).news or []
+                cutoff = _t.time() - days * 86400
+                cnt = 0
+                for n in news:
+                    # yfinance 新格式: n['content']['pubDate']  老格式: n['providerPublishTime']
+                    ts = None
+                    if isinstance(n, dict):
+                        c = n.get("content") or {}
+                        pd_str = c.get("pubDate")
+                        if pd_str:
+                            try:
+                                from datetime import datetime
+                                ts = datetime.fromisoformat(pd_str.replace("Z","+00:00")).timestamp()
+                            except: pass
+                        if ts is None:
+                            ts = n.get("providerPublishTime")
+                    if ts and ts > cutoff:
+                        cnt += 1
+                result[0] = cnt
+            except: pass
+        import threading as _th
+        th = _th.Thread(target=_do, daemon=True)
+        th.start(); th.join(timeout=5)
+        return result[0]
+    except:
+        return 0
+
+def _clamp(v, lo=0, hi=100):
+    return max(lo, min(hi, v))
+
+def _score_one(rank, total, info, ps_stats, ticker, prices, news_count):
+    """计算一只股票的 5 维评分。返回 dict[dim -> 0-100]"""
+    import pandas as pd, numpy as np
+    # 1) logic: 线性 100 → 5（rank=1 → 100, rank=20 → 5）
+    logic = _clamp(100 - (rank - 1) * (95 / max(total - 1, 1)))
+
+    # 2) fundamental: 综合 ROE / 利润率 / 营收增长 / 负债率
+    f_parts = []
+    if info.get("returnOnEquity") is not None:
+        # ROE: -20%→0, 0%→30, 15%→70, 30%+→100
+        roe = info["returnOnEquity"] * 100
+        f_parts.append(_clamp(30 + roe * 2.3))
+    if info.get("profitMargins") is not None:
+        pm = info["profitMargins"] * 100
+        f_parts.append(_clamp(40 + pm * 2.0))
+    if info.get("revenueGrowth") is not None:
+        rg = info["revenueGrowth"] * 100
+        # 0% 增长 → 40，20% 增长 → 80
+        f_parts.append(_clamp(40 + rg * 2.0))
+    if info.get("debtToEquity") is not None:
+        # debtToEquity 0-50 优秀，>200 危险
+        d = info["debtToEquity"]
+        f_parts.append(_clamp(100 - d * 0.4))
+    fundamental = round(sum(f_parts) / len(f_parts), 1) if f_parts else 50.0
+
+    # 3) management / 股东结构
+    m_parts = []
+    if info.get("institutionsPercentHeld") is not None:
+        ih = info["institutionsPercentHeld"] * 100
+        # 30%→30, 70%→70, 90%+→90
+        m_parts.append(_clamp(ih))
+    # heldPercentInsiders 用 .info 也能拿；但我们没缓存，用近似：高内部持股=正面
+    if info.get("heldPercentInsiders") is not None:
+        ins = info["heldPercentInsiders"] * 100
+        # 0-5% 普通管理层，5-15% 高管理参与，>30% 创始人控股（中性偏正）
+        m_parts.append(_clamp(40 + ins * 4))
+    # recommendationMean: 1=strong buy ... 5=sell
+    if info.get("recommendationMean") is not None:
+        rm = info["recommendationMean"]
+        # 1→100, 2→75, 3→50, 4→25, 5→0
+        m_parts.append(_clamp(125 - rm * 25))
+    # numberOfAnalystOpinions: 覆盖度
+    if info.get("numberOfAnalystOpinions") is not None:
+        n_an = info["numberOfAnalystOpinions"]
+        m_parts.append(_clamp(20 + n_an * 3))   # 5 个分析师→35, 25 个→95
+    management = round(sum(m_parts) / len(m_parts), 1) if m_parts else 50.0
+
+    # 4) news / 资讯热度（最近 14 天新闻 + 5 日动量 + 上行空间）
+    n_parts = []
+    # 新闻数：0 = 30 分（冷淡），8+ = 90 分；过 20 视为过热（80）
+    if news_count is not None:
+        n_parts.append(_clamp(30 + news_count * 7.5) if news_count <= 8 else _clamp(90 - (news_count - 8) * 0.5))
+    # 5 日动量：>0 加分
+    if ticker in prices.columns:
+        s = prices[ticker].dropna()
+        if len(s) >= 6:
+            r5 = float(s.iloc[-1] / s.iloc[-6] - 1) * 100
+            n_parts.append(_clamp(50 + r5 * 4))
+    # 距分析师目标价上行空间
+    if info.get("targetMeanPrice") and info.get("currentPrice"):
+        upside = (info["targetMeanPrice"] / info["currentPrice"] - 1) * 100
+        # -10% → 20, 0 → 50, +20% → 90
+        n_parts.append(_clamp(50 + upside * 2))
+    news = round(sum(n_parts) / len(n_parts), 1) if n_parts else 50.0
+
+    # 5) technical：均线 + 距 52W 高 + RSI(14)
+    t_parts = []
+    if ticker in prices.columns:
+        s = prices[ticker].dropna()
+        if len(s) >= 200:
+            last = float(s.iloc[-1])
+            ma50  = float(s.tail(50).mean())
+            ma200 = float(s.tail(200).mean())
+            # 均线排列分：price > ma50 > ma200 多头排列
+            score_ma = 0
+            if last > ma50:  score_ma += 35
+            if last > ma200: score_ma += 35
+            if ma50 > ma200: score_ma += 30
+            t_parts.append(score_ma)
+        if len(s) >= 252:
+            high_52w = float(s.tail(252).max())
+            dist = (s.iloc[-1] / high_52w - 1) * 100   # 通常负值
+            # 0%（贴顶）→ 100，-10% → 50，-25% → 10
+            t_parts.append(_clamp(100 + dist * 4))
+        # RSI(14)
+        rsi14 = _rsi(s, 14)
+        if len(rsi14) and not pd.isna(rsi14.iloc[-1]):
+            r = float(rsi14.iloc[-1])
+            # 30-70 健康区间 = 高分；<30 超卖 = 中分（可能反转）；>80 过热扣分
+            if 50 <= r <= 70: t_parts.append(90)
+            elif 40 <= r < 50: t_parts.append(70)
+            elif 30 <= r < 40: t_parts.append(55)
+            elif 70 < r <= 80: t_parts.append(70)
+            elif r > 80: t_parts.append(_clamp(70 - (r - 80) * 3))
+            else: t_parts.append(_clamp(40 + r * 0.5))  # <30 超卖
+    technical = round(sum(t_parts) / len(t_parts), 1) if t_parts else 50.0
+
+    # 综合分：权重可调
+    composite = round(0.30 * logic + 0.25 * fundamental + 0.15 * management + 0.10 * news + 0.20 * technical, 1)
+
+    return {
+        "score_total":       composite,
+        "score_logic":       round(logic, 1),
+        "score_fundamental": fundamental,
+        "score_management":  management,
+        "score_news":        news,
+        "score_technical":   technical,
+        "news_count_14d":    int(news_count or 0),
+    }
+
+def _add_scores(df, prices, top_n=20):
+    """给前 top_n 名计算 5 维评分。需要拉 info + news（受现有 _info_cache 加速）"""
+    if df.empty: return df
+
+    for col in ("score_total","score_logic","score_fundamental","score_management",
+                "score_news","score_technical","news_count_14d"):
+        df[col] = None
+
+    top_idx = list(df.head(top_n).index)
+    top_tickers = df.loc[top_idx, "ticker"].tolist()
+    if not top_tickers: return df
+
+    # 并发拉 info（命中现有缓存就快）
+    INFO_FIELDS = [
+        "returnOnEquity","profitMargins","revenueGrowth","debtToEquity",
+        "institutionsPercentHeld","heldPercentInsiders","recommendationMean",
+        "numberOfAnalystOpinions","targetMeanPrice","currentPrice",
+    ]
+    infos = _parallel_info(top_tickers, INFO_FIELDS, "评分基本面", 96, 98, workers=20)
+
+    # 并发拉 news count（独立线程池，5s 超时）
+    log("评分：拉取新闻热度…", 98)
+    news_map = {}
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        futs = {ex.submit(_fetch_news_count, t, 14): t for t in top_tickers}
+        for f in as_completed(futs):
+            t = futs[f]
+            try: news_map[t] = f.result()
+            except: news_map[t] = 0
+
+    total = len(top_idx)
+    for i in top_idx:
+        ticker = df.at[i, "ticker"]
+        rank   = df.at[i, "rank"] if "rank" in df.columns else top_idx.index(i) + 1
+        scores = _score_one(int(rank), total, infos.get(ticker, {}), None, ticker, prices, news_map.get(ticker, 0))
+        for k, v in scores.items():
+            df.at[i, k] = v
+    return df
+
 # ─── 详情接口 ─────────────────────────────────────────────────────────────────
 
 @app.route("/api/detail/<ticker>")
@@ -1650,6 +1844,7 @@ def api_run():
             df, skipped = _add_targets(df, prices, strategy,
                                        balance_sectors=balance_sectors,
                                        max_per_sector=max_per_sector)
+            df = _add_scores(df, prices, top_n=20)
             diagnostics = _diagnose_top10(df, prices)
             rows = df.head(100).to_dict(orient="records")
             _broadcast("done", {"rows": rows, "start": start_str, "end": end_str,
