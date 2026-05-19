@@ -36,6 +36,36 @@ body{display:flex;flex-direction:column;height:100vh;overflow:hidden}
 .tgt-bar-stop{background:rgba(220,38,38,.6)}
 .tgt-bar-now{background:#fff;border-left:1px solid var(--accent);border-right:1px solid var(--accent);flex-shrink:0}
 .tgt-bar-target{background:rgba(22,163,74,.6)}
+.target-3tier{display:grid;grid-template-columns:1fr 1.15fr 1fr;gap:5px;margin-top:6px}
+.tt-card{background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:8px 6px;text-align:center}
+.tt-card.tt-mid{background:rgba(22,163,74,.06);border-color:rgba(22,163,74,.3)}
+.tt-card.tt-low{background:rgba(217,119,6,.04);border-color:rgba(217,119,6,.25)}
+.tt-card.tt-high{background:rgba(37,99,235,.06);border-color:rgba(37,99,235,.25)}
+.tt-lbl{font-size:9px;color:var(--text3);font-weight:700;letter-spacing:.02em;text-transform:uppercase}
+.tt-mid .tt-lbl{color:#15803d}
+.tt-low .tt-lbl{color:#b45309}
+.tt-high .tt-lbl{color:var(--accent)}
+.tt-price{font-size:16px;font-weight:800;font-variant-numeric:tabular-nums;margin-top:3px}
+.tt-mid .tt-price{font-size:18px;color:#15803d}
+.tt-up{font-size:10px;font-weight:700;color:var(--text2);margin-top:1px;font-variant-numeric:tabular-nums}
+.tt-mid .tt-up{color:#15803d}
+.tt-low .tt-up{color:#b45309}
+.tt-high .tt-up{color:var(--accent)}
+.model-breakdown{margin-top:8px;border:1px solid var(--border);border-radius:5px;padding:0;overflow:hidden}
+.model-breakdown summary{padding:7px 10px;background:var(--surface2);font-size:11px;font-weight:700;color:var(--text2);cursor:pointer;list-style:none}
+.model-breakdown summary::-webkit-details-marker{display:none}
+.model-breakdown summary:hover{background:rgba(37,99,235,.05);color:var(--accent)}
+.model-breakdown[open] summary{border-bottom:1px solid var(--border)}
+.model-list{padding:8px 10px;display:flex;flex-direction:column;gap:5px}
+.model-row{display:grid;grid-template-columns:60px 32px 1fr 50px 42px;gap:6px;align-items:center;font-size:11px;line-height:1.2}
+.model-name{color:var(--text2);font-weight:600;font-size:11px}
+.model-w{color:var(--text3);font-size:10px;text-align:right;font-variant-numeric:tabular-nums}
+.model-bar{height:6px;background:var(--surface2);border:1px solid var(--border);border-radius:3px;overflow:hidden}
+.model-bar-fill{height:100%;background:linear-gradient(90deg,var(--accent),#60a5fa);border-radius:3px;transition:width .3s}
+.model-price{text-align:right;font-weight:700;font-variant-numeric:tabular-nums;color:var(--text)}
+.model-up{text-align:right;font-weight:700;color:var(--green);font-variant-numeric:tabular-nums;font-size:10px}
+.model-na{grid-column:2/-1;color:var(--text3);font-size:10px;font-style:italic;text-align:right}
+.model-note{padding:6px 10px;font-size:10px;color:var(--text3);background:var(--surface2);border-top:1px solid var(--border);line-height:1.5}
 .strategy-bar{
   display:flex;align-items:center;gap:0;padding:0 20px;
   border-bottom:1px solid var(--border);overflow-x:auto;
@@ -839,9 +869,15 @@ const COL_DEF = {
   }},
   weekly_bullish:{ label:'周线趋势',    fmt:(v)=>v?'<span style="color:var(--green);font-weight:700;font-size:11px">↑ 向上</span>':'<span style="color:var(--red);font-size:11px">↓ 向下</span>' },
   // 目标价/止损（仅前10名）
-  target:       { label:'目标价',       fmt:(v,r)=>{
+  target:       { label:'目标(低/中/高)', fmt:(v,r)=>{
     if(v==null) return '<span class="neu">—</span>';
-    return `<div class="tgt-cell"><span class="v pos">$${v}</span><span class="pct pos">+${r.upside_pct}%</span></div>`;
+    const low  = r.target_low  ?? v;
+    const high = r.target_high ?? v;
+    const upMid  = ((v/r.price - 1)*100).toFixed(0);
+    return `<div style="display:flex;flex-direction:column;gap:1px;line-height:1.1">
+      <span style="font-weight:700;color:#16a34a;font-size:12px">$${v} <span style="color:var(--text3);font-weight:600;font-size:10px">+${upMid}%</span></span>
+      <span style="font-size:9px;color:var(--text3);font-variant-numeric:tabular-nums">$${low} - $${high}</span>
+    </div>`;
   }},
   stop:         { label:'止损位',       fmt:(v,r)=>{
     if(v==null) return '<span class="neu">—</span>';
@@ -2196,38 +2232,88 @@ function renderDetail({info,prices}, row) {
 
   if (row.target!=null && row.stop!=null) {
     const price = row.price;
-    const stop = row.stop, target = row.target;
-    // bar positioning: stop -> price -> target
-    const span = target - stop;
-    const stopToPrice = ((price-stop)/span*100).toFixed(1);
-    const priceToTarget = ((target-price)/span*100).toFixed(1);
+    const stop = row.stop;
+    const tLow  = row.target_low  != null ? row.target_low  : row.target;
+    const tMid  = row.target;
+    const tHigh = row.target_high != null ? row.target_high : row.target;
+    const upLow  = ((tLow / price - 1) * 100).toFixed(1);
+    const upMid  = ((tMid / price - 1) * 100).toFixed(1);
+    const upHigh = ((tHigh / price - 1) * 100).toFixed(1);
+    // 进度条用 mid 目标作右端
+    const span = Math.max(tMid - stop, 1e-6);
+    const stopToPrice   = ((price - stop) / span * 100).toFixed(1);
+    const priceToTarget = ((tMid - price) / span * 100).toFixed(1);
     const termColor = row.term==='short'?'#dc2626':row.term==='mid'?'#d97706':'#15803d';
     const termLabel = row.term==='short'?'短线':row.term==='mid'?'中线':'长线';
+
+    // 模型贡献条
+    const MODEL_LABELS = {
+      atr:'ATR隧道', hist_vol:'历史波动', pe:'PE回归',
+      analyst:'分析师共识', resistance:'技术阻力', mean_revert:'均值回归'
+    };
+    const models = row.target_models || {};
+    let modelRows = '';
+    Object.entries(MODEL_LABELS).forEach(([key, lbl]) => {
+      const m = models[key];
+      if (!m) {
+        modelRows += `<div class="model-row">
+          <span class="model-name">${lbl}</span>
+          <span class="model-na">不适用</span>
+        </div>`;
+        return;
+      }
+      const widthPct = Math.min(100, m.upside_pct * 2); // 50% upside → 100% bar
+      modelRows += `<div class="model-row">
+        <span class="model-name">${lbl}</span>
+        <span class="model-w">${(m.weight*100).toFixed(0)}%</span>
+        <div class="model-bar"><div class="model-bar-fill" style="width:${widthPct}%"></div></div>
+        <span class="model-price">$${m.price}</span>
+        <span class="model-up">+${m.upside_pct}%</span>
+      </div>`;
+    });
+
     targetCard = `
       <div class="sec-head" style="display:flex;justify-content:space-between;align-items:center">
         <span>买入参考价 · ${row.horizon||''}</span>
         <span style="font-size:10px;color:${termColor};font-weight:700;padding:1px 6px;border:1px solid ${termColor};border-radius:3px">${termLabel}</span>
       </div>
-      <div class="stat-grid" style="grid-template-columns:1fr 1fr 1fr;gap:5px">
-        <div class="stat-card"><div class="stat-lbl">止损位</div>
-          <div class="stat-val r" style="font-size:18px">$${stop}</div>
+      <div class="target-3tier">
+        <div class="tt-card tt-low">
+          <div class="tt-lbl">保守目标</div>
+          <div class="tt-price">$${tLow}</div>
+          <div class="tt-up">+${upLow}%</div>
+        </div>
+        <div class="tt-card tt-mid">
+          <div class="tt-lbl">基础目标 ⭐</div>
+          <div class="tt-price">$${tMid}</div>
+          <div class="tt-up">+${upMid}%</div>
+        </div>
+        <div class="tt-card tt-high">
+          <div class="tt-lbl">乐观目标</div>
+          <div class="tt-price">$${tHigh}</div>
+          <div class="tt-up">+${upHigh}%</div>
+        </div>
+      </div>
+      <div class="stat-grid" style="grid-template-columns:1fr 1fr;gap:5px;margin-top:6px">
+        <div class="stat-card"><div class="stat-lbl">智能止损</div>
+          <div class="stat-val r" style="font-size:17px">$${stop}</div>
           <div style="font-size:11px;color:var(--red);font-weight:600;margin-top:2px">-${row.downside_pct}%</div></div>
-        <div class="stat-card"><div class="stat-lbl">当前价</div>
-          <div class="stat-val" style="font-size:18px">$${price}</div>
-          <div style="font-size:11px;color:var(--text3);font-weight:600;margin-top:2px">入场价</div></div>
-        <div class="stat-card"><div class="stat-lbl">目标价</div>
-          <div class="stat-val g" style="font-size:18px">$${target}</div>
-          <div style="font-size:11px;color:var(--green);font-weight:600;margin-top:2px">+${row.upside_pct}%</div></div>
+        <div class="stat-card"><div class="stat-lbl">当前价 · 入场</div>
+          <div class="stat-val" style="font-size:17px">$${price}</div>
+          <div style="font-size:11px;color:var(--text3);font-weight:600;margin-top:2px">风险回报 ${row.risk_reward}:1</div></div>
       </div>
       <div class="tgt-bar">
         <div class="tgt-bar-stop" style="width:${stopToPrice}%"></div>
         <div class="tgt-bar-now" style="width:2px"></div>
         <div class="tgt-bar-target" style="width:${priceToTarget}%"></div>
       </div>
-      <div style="font-size:11px;color:var(--text3);margin-top:6px;display:flex;justify-content:space-between">
-        <span>风险回报比 <strong style="color:var(--accent)">${row.risk_reward}:1</strong></span>
-        <span>ATR(14) 倍数法</span>
-      </div>
+      <details class="model-breakdown">
+        <summary>📊 五模型贡献明细</summary>
+        <div class="model-list">${modelRows}</div>
+        <div class="model-note">
+          基础目标 = 各模型按权重加权平均。保守 ≈ 风险隧道下沿，乐观 ≈ 阻力位/分析师高位。
+        </div>
+      </details>
       <div class="sizer-box">
         <div style="font-size:11px;font-weight:700;color:var(--text2)">💰 仓位计算（1% 法则）</div>
         <div class="sizer-row">

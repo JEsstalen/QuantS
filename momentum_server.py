@@ -237,11 +237,12 @@ def _fetch_info(ticker, fields):
             return ticker, {k: None for k in fields}
         data = {k: _safe(result[0].get(k)) for k in (
             "returnOnEquity","profitMargins","priceToSalesTrailing12Months","beta",
-            "trailingPE","forwardPE","priceToBook","enterpriseToEbitda","marketCap",
+            "trailingPE","forwardPE","forwardEps","priceToBook","enterpriseToEbitda","marketCap",
             "revenueGrowth","earningsGrowth","debtToEquity","dividendYield",
             "fiftyTwoWeekHigh","fiftyTwoWeekLow","targetMeanPrice","recommendationKey",
+            "recommendationMean","numberOfAnalystOpinions","currentPrice",
             "shortName","sector","industry",
-            "shortPercentOfFloat","institutionsPercentHeld",
+            "shortPercentOfFloat","institutionsPercentHeld","heldPercentInsiders",
         )}
         _cache_set_info(ticker, data)
         return ticker, {k: data.get(k) for k in fields}
@@ -1434,7 +1435,7 @@ def _balance_by_sector(df, max_per_sector=2, top_n=10):
     if df.empty: return df.head(0), []
     picked_idx = []
     sector_count = {}
-    skipped = []   # 被跳过的股票（ticker, sector, reason）
+    skipped = []
     for i in df.index:
         sec = df.at[i, "sector"]
         sec_key = str(sec) if sec is not None and not pd.isna(sec) else "未知"
@@ -1453,22 +1454,228 @@ def _balance_by_sector(df, max_per_sector=2, top_n=10):
     balanced = df.loc[picked_idx].copy()
     return balanced, skipped
 
+
+# ─── Top 20 多维评分 ─────────────────────────────────────────────────────────
+# 5 个维度（0-100）：
+#   logic      策略排名：top1=100, top20=5（线性）
+#   fundamental ROE + 利润率 + 增长率 + 负债率
+#   management 机构持仓 + 内部持股 + 分析师评级 + 覆盖度
+#   news       近 14 日新闻数 + 近 5 日动量 + 距分析师目标价上行空间
+#   technical  距 200 日均线 + 距 52W 高点 + RSI(14) 健康度
+
+
+# ─── 多模型目标价测算（5 模型加权 → 三档输出）────────────────────────────────
+# 各模型给出 target_estimate（绝对价格），按策略类型分配不同权重
+
+# 历史 PE 中位数（行业近似）— 用 sector 估值锚定
+_SECTOR_PE_MEDIAN = {
+    "Technology": 28, "Communication Services": 22, "Consumer Cyclical": 20,
+    "Consumer Defensive": 22, "Healthcare": 22, "Industrials": 20,
+    "Financial Services": 14, "Real Estate": 30, "Utilities": 18,
+    "Energy": 12, "Basic Materials": 16,
+}
+
+def _model_atr(entry, atr, mult):
+    """ATR 隧道：保守锚，作下限"""
+    return entry + mult * atr if (entry and atr) else None
+
+def _model_hist_vol(entry, prices_series, horizon_days, sigma_mult=1.5):
+    """历史波动率隧道：1 年日收益 σ × √(持有期/252) × 倍数"""
+    import math, pandas as pd
+    if entry is None or prices_series is None or len(prices_series) < 30: return None
+    dr = prices_series.tail(252).pct_change().dropna()
+    if len(dr) < 30: return None
+    sd = float(dr.std())
+    if sd <= 0: return None
+    expected = entry * (1 + sd * math.sqrt(horizon_days / 252) * sigma_mult)
+    return expected
+
+def _model_pe_regression(info, sector):
+    """PE 回归：远期 EPS × max(行业 PE 中位数, 当前 PE × 0.8)
+    对低估股票上调目标，对高估股票打折"""
+    fwd_eps = info.get("forwardEps")
+    if fwd_eps is None or fwd_eps <= 0: return None
+    cur_pe = info.get("trailingPE")
+    sec_pe = _SECTOR_PE_MEDIAN.get(sector, 20)
+    # 取行业中位数 + 一点上行（高动量股票通常溢价）
+    target_pe = sec_pe * 1.1
+    if cur_pe and cur_pe > sec_pe * 1.5:
+        # 当前 PE 显著高于行业 → 用更保守的 0.9× 当前 PE
+        target_pe = min(target_pe, cur_pe * 0.9)
+    return float(fwd_eps) * target_pe
+
+def _model_analyst(info):
+    """分析师共识 targetMeanPrice"""
+    return info.get("targetMeanPrice")
+
+def _model_resistance(prices_series):
+    """技术阻力位：52 周高点 + Bollinger 上轨较高值"""
+    import pandas as pd
+    if prices_series is None or len(prices_series) < 60: return None, None
+    high_52w = float(prices_series.tail(252).max()) if len(prices_series) >= 252 else float(prices_series.max())
+    # Bollinger 上轨 = MA20 + 2*std
+    last20 = prices_series.tail(20)
+    if len(last20) >= 20:
+        ma = float(last20.mean()); sd = float(last20.std())
+        boll_up = ma + 2 * sd
+    else:
+        boll_up = None
+    return high_52w, boll_up
+
+def _model_mean_revert(prices_series, days=20):
+    """均值回归目标 = MA(days)（适用 Connors RSI 等超卖反弹）"""
+    import pandas as pd
+    if prices_series is None or len(prices_series) < days: return None
+    return float(prices_series.tail(days).mean())
+
+# 策略 → 模型权重表
+# (atr_w, hist_vol_w, pe_w, analyst_w, resistance_w, mean_revert_w)
+_TARGET_WEIGHTS = {
+    # 短线：均值回归主导
+    "connors_rsi":      (0.10, 0.15, 0.00, 0.15, 0.10, 0.50),
+    # 中线趋势：ATR + 阻力 + 分析师
+    "momentum":         (0.20, 0.20, 0.10, 0.25, 0.25, 0.00),
+    "momentum_quality": (0.15, 0.15, 0.20, 0.25, 0.25, 0.00),
+    "low_vol":          (0.25, 0.25, 0.10, 0.20, 0.20, 0.00),
+    "dual_momentum":    (0.20, 0.20, 0.10, 0.25, 0.25, 0.00),
+    "multifactor":      (0.15, 0.20, 0.15, 0.25, 0.25, 0.00),
+    # 长线：PE + 分析师主导
+    "piotroski":        (0.10, 0.10, 0.40, 0.30, 0.10, 0.00),
+    "high52w":          (0.15, 0.15, 0.20, 0.25, 0.25, 0.00),
+}
+
+# 持有期（天）— 用于 hist_vol 模型
+_HORIZON_DAYS = {
+    "connors_rsi": 5, "momentum": 60, "momentum_quality": 60, "low_vol": 60,
+    "dual_momentum": 60, "multifactor": 60, "piotroski": 365, "high52w": 365,
+}
+
+def _compute_target_models(ticker, entry, atr, prices, info, sector, strategy):
+    """对一只股票运行所有模型，返回 dict[model_name → price]"""
+    if entry is None or entry <= 0: return None
+    series = prices[ticker].dropna() if ticker in prices.columns else None
+    horizon = _HORIZON_DAYS.get(strategy, 60)
+    atr_mult = 4.0 if strategy in ("piotroski","high52w") else (1.5 if strategy == "connors_rsi" else 4.0)
+
+    models = {
+        "atr":         _model_atr(entry, atr, atr_mult),
+        "hist_vol":    _model_hist_vol(entry, series, horizon, sigma_mult=1.5),
+        "pe":          _model_pe_regression(info, sector),
+        "analyst":     _model_analyst(info),
+    }
+    high_52w, boll = _model_resistance(series)
+    # resistance：取阻力位中较接近现价的（防止远端高点拉高目标）
+    cand = [v for v in (high_52w, boll) if v is not None and v > entry]
+    models["resistance"] = min(cand) if cand else high_52w
+    if strategy == "connors_rsi":
+        models["mean_revert"] = _model_mean_revert(series, 20)
+    else:
+        models["mean_revert"] = None
+
+    return models
+
+def _aggregate_target(entry, models, strategy):
+    """加权 + 三档输出
+    target_mid:  按权重加权平均（缺失模型权重不计入）
+    target_low:  ATR隧道下沿 + 历史波动率 5% 分位（即更保守）
+    target_high: max(分析师高位，阻力位)
+    每个目标必须 > entry，否则视作不合理
+    """
+    weights = _TARGET_WEIGHTS.get(strategy, _TARGET_WEIGHTS["momentum"])
+    model_keys = ["atr","hist_vol","pe","analyst","resistance","mean_revert"]
+
+    # mid: 加权平均（只对 > entry 的有效值）
+    weighted_sum = 0.0
+    weight_total = 0.0
+    contributions = {}
+    for key, w in zip(model_keys, weights):
+        v = models.get(key)
+        if v is not None and v > entry and w > 0:
+            weighted_sum += v * w
+            weight_total += w
+            contributions[key] = {"price": round(float(v), 2), "weight": w,
+                                  "upside_pct": round((v/entry-1)*100, 2)}
+    target_mid = weighted_sum / weight_total if weight_total > 0 else None
+
+    # low: 保守锚 — ATR×低倍数 OR 历史波动率1σ
+    import math
+    low_candidates = []
+    if models.get("atr") is not None:
+        # 对应 ATR×半倍数（保守一档）
+        atr_low = entry + (models["atr"] - entry) * 0.5
+        if atr_low > entry: low_candidates.append(atr_low)
+    if models.get("hist_vol") is not None:
+        # 1σ 而不是 1.5σ
+        hv = entry + (models["hist_vol"] - entry) * (1.0/1.5)
+        if hv > entry: low_candidates.append(hv)
+    target_low = min(low_candidates) if low_candidates else target_mid
+
+    # high: 乐观锚 — 取 resistance / analyst 中较高者
+    high_candidates = []
+    if models.get("resistance") is not None and models["resistance"] > entry:
+        high_candidates.append(models["resistance"])
+    if models.get("analyst") is not None and models["analyst"] > entry:
+        # 分析师 + 10% 视为乐观情况
+        high_candidates.append(models["analyst"] * 1.05)
+    target_high = max(high_candidates) if high_candidates else (target_mid * 1.1 if target_mid else None)
+
+    # 校验：low ≤ mid ≤ high
+    if target_low and target_mid and target_low > target_mid:
+        target_low, target_mid = target_mid * 0.92, target_low
+    if target_high and target_mid and target_high < target_mid:
+        target_high = target_mid * 1.1
+
+    return {
+        "target_low":  round(target_low, 2) if target_low else None,
+        "target_mid":  round(target_mid, 2) if target_mid else None,
+        "target_high": round(target_high, 2) if target_high else None,
+        "model_contributions": contributions,
+    }
+
+def _smart_stop(entry, atr, prices, ticker, strategy):
+    """智能止损：max(ATR×倍数, 近20日支撑, 200日均线下方)
+    取这些下行底之 max（即损失最小），更贴近真实风控
+    """
+    import pandas as pd
+    if entry is None: return None
+    stop_mult = 1.5 if strategy == "connors_rsi" else (2.5 if strategy in ("piotroski","high52w") else 2.0)
+    candidates = []
+    if atr and atr > 0:
+        candidates.append(entry - stop_mult * atr)
+    if ticker in prices.columns:
+        s = prices[ticker].dropna()
+        # 近 20 日低点（向下支撑）
+        if len(s) >= 20:
+            low20 = float(s.tail(20).min())
+            candidates.append(low20 * 0.99)  # 略低于支撑
+        # 200日均线（中长线策略用做止损线）
+        if len(s) >= 200 and strategy in ("piotroski","high52w","momentum_quality","multifactor","momentum","dual_momentum"):
+            ma200 = float(s.tail(200).mean())
+            candidates.append(ma200)
+    if not candidates: return None
+    valid = [c for c in candidates if c is not None and c < entry]
+    if not valid: return entry - 2 * (atr or entry*0.05)
+    return max(valid)  # 取最高（损失最小）
+
+
 def _add_targets(df, prices, strategy, balance_sectors=False, max_per_sector=2):
     """给前10名计算目标价 / 止损 / 风险回报比 / 财报日期 / 流动性
-    使用 True Range ATR（带 H/L/C 数据），并标记低流动性股票
+    目标价用 5 模型加权 → 三档（low/mid/high）
+    止损用 ATR + 支撑位 + 200日均线 三者最高（损失最小）
     """
     import pandas as pd, numpy as np
     if df.empty: return df, None
-    term, stop_mult, target_mult, horizon, basis = _TERM_MAP.get(
+    term, _legacy_stop, _legacy_tgt, horizon, basis = _TERM_MAP.get(
         strategy, ("mid", 2.0, 4.0, "1-3月", "2:1 R:R"))
 
     df["term"]    = term
     df["horizon"] = horizon
     for col in ("target","stop","risk_reward","upside_pct","downside_pct",
-                "earnings_date","days_to_earnings","atr","dollar_vol_20d","low_liq"):
+                "earnings_date","days_to_earnings","atr","dollar_vol_20d","low_liq",
+                "target_low","target_high","target_models"):
         df[col] = None
 
-    # 板块均衡：从排行榜按规则筛 10 只
+    # 板块均衡
     skipped = []
     if balance_sectors:
         balanced, skipped = _balance_by_sector(df, max_per_sector=max_per_sector, top_n=10)
@@ -1477,8 +1684,11 @@ def _add_targets(df, prices, strategy, balance_sectors=False, max_per_sector=2):
         top10_idx = list(df.head(10).index)
     top10_tickers = df.loc[top10_idx, "ticker"].tolist()
 
-    # 并行拉前10名财报日期
-    earnings_map = _parallel_earnings(top10_tickers, 96, 99, workers=10)
+    # 并行拉前10名财报日期 + 估值字段
+    earnings_map = _parallel_earnings(top10_tickers, 90, 94, workers=10)
+    log("目标价模型：拉取估值字段…", 95)
+    VALUATION_FIELDS = ["forwardEps","trailingPE","targetMeanPrice","sector","currentPrice"]
+    info_map = _parallel_info(top10_tickers, VALUATION_FIELDS, "估值", 95, 98, workers=20)
 
     today_dt = pd.Timestamp.today().normalize()
     for i in top10_idx:
@@ -1486,37 +1696,43 @@ def _add_targets(df, prices, strategy, balance_sectors=False, max_per_sector=2):
         entry = df.at[i, "price"]
         if entry is None or pd.isna(entry): continue
 
-        # 真 ATR + 流动性（H/L/C + Volume）
+        # 真 ATR + 流动性
         atr_t, adv = _atr_true(ticker, n=14, dollar_vol=True)
-        # fallback：拉不到 H/L 时用 close 近似
         if atr_t is None and ticker in prices.columns:
             atr_t = _atr(prices, ticker, 14)
         if atr_t is None: continue
 
-        stop_price   = entry - stop_mult   * atr_t
-        target_price = entry + target_mult * atr_t
+        info = info_map.get(ticker, {}) or {}
+        sector = info.get("sector") or str(df.at[i, "sector"] or "")
 
-        # Connors 短线：目标用 MA20（mean reversion）
-        if strategy == "connors_rsi" and ticker in prices.columns:
-            s = prices[ticker].dropna()
-            if len(s) >= 20:
-                ma20 = float(s.tail(20).mean())
-                target_price = max(target_price, ma20)
+        # 5 模型目标价
+        models = _compute_target_models(ticker, entry, atr_t, prices, info, sector, strategy)
+        tgt = _aggregate_target(entry, models, strategy) if models else None
+
+        # 智能止损
+        stop_price = _smart_stop(entry, atr_t, prices, ticker, strategy)
+
+        # 主目标用 target_mid
+        target_price = tgt["target_mid"] if tgt and tgt.get("target_mid") else (entry + 4 * atr_t)
 
         upside   = (target_price/entry - 1) * 100
-        downside = (1 - stop_price/entry)   * 100
-        rr = target_mult / stop_mult
+        downside = (1 - stop_price/entry) * 100 if stop_price else None
+        rr = (target_price - entry) / (entry - stop_price) if (stop_price and entry > stop_price) else None
 
         df.at[i, "target"]       = round(float(target_price), 2)
-        df.at[i, "stop"]         = round(float(stop_price),   2)
-        df.at[i, "upside_pct"]   = round(float(upside),       2)
-        df.at[i, "downside_pct"] = round(float(downside),     2)
-        df.at[i, "risk_reward"]  = round(float(rr),           2)
-        df.at[i, "atr"]          = round(float(atr_t),        2)
+        df.at[i, "stop"]         = round(float(stop_price), 2) if stop_price else None
+        df.at[i, "upside_pct"]   = round(float(upside), 2)
+        df.at[i, "downside_pct"] = round(float(downside), 2) if downside else None
+        df.at[i, "risk_reward"]  = round(float(rr), 2) if rr else None
+        df.at[i, "atr"]          = round(float(atr_t), 2)
+        if tgt:
+            df.at[i, "target_low"]      = tgt.get("target_low")
+            df.at[i, "target_high"]     = tgt.get("target_high")
+            df.at[i, "target_models"]   = tgt.get("model_contributions")
 
-        # 流动性：日均美元成交额；< $5M 视为低流动性
+        # 流动性
         if adv is not None:
-            df.at[i, "dollar_vol_20d"] = round(float(adv) / 1e6, 1)  # 单位：百万美元
+            df.at[i, "dollar_vol_20d"] = round(float(adv) / 1e6, 1)
             df.at[i, "low_liq"]        = bool(adv < 5e6)
 
         # 财报日
@@ -1529,7 +1745,7 @@ def _add_targets(df, prices, strategy, balance_sectors=False, max_per_sector=2):
                 df.at[i, "days_to_earnings"] = days
             except: pass
 
-    # 如果做了板块均衡：把均衡后的10只搬到表头，原排名仍保留在 orig_rank
+    # 板块均衡：搬到表头
     if balance_sectors:
         df["orig_rank"] = df["rank"]
         balanced_rows = df.loc[top10_idx].copy()
@@ -1593,14 +1809,6 @@ def _diagnose_top10(df, prices):
         "sector_bars":  sector_bars,
         "warnings":     warnings_list,
     }
-
-# ─── Top 20 多维评分 ─────────────────────────────────────────────────────────
-# 5 个维度（0-100）：
-#   logic      策略排名：top1=100, top20=5（线性）
-#   fundamental ROE + 利润率 + 增长率 + 负债率
-#   management 机构持仓 + 内部持股 + 分析师评级 + 覆盖度
-#   news       近 14 日新闻数 + 近 5 日动量 + 距分析师目标价上行空间
-#   technical  距 200 日均线 + 距 52W 高点 + RSI(14) 健康度
 
 def _fetch_news_count(ticker, days=14):
     """近 days 天新闻数（yfinance.news 实时返回，无缓存）"""
