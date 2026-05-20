@@ -1208,7 +1208,7 @@ def calc_52w_high(prices, meta, start_str, end_str, _skip_external=False):
         })
 
     df = pd.DataFrame(results)
-    # 排序：先按通过过滤排，通过的内部按距高点近排��dist_high 越接近0越前）
+    # 排序：先按通过过滤排，通过的内部按距高点近排（dist_high 越接近0越前）
     df["_sort"] = df["dist_high"].where(df["passed"], other=-9999)
     df = df.sort_values("_sort", ascending=False).drop(columns=["_sort"]).reset_index(drop=True)
     df.insert(0, "rank", range(1, len(df)+1))
