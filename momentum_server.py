@@ -1754,6 +1754,167 @@ def _add_targets(df, prices, strategy, balance_sectors=False, max_per_sector=2):
         df["rank"] = range(1, len(df) + 1)
     return df, skipped if balance_sectors else None
 
+# ─── 护城河指标（ROIC / 毛利稳定性 / 5年ROE持续性）────────────────────────────
+# 三件套从 yfinance 年度财报（最多 5 年）算出，反映"真正的护城河"
+#   - ROIC > WACC 持续 = Morningstar Wide Moat 标准
+#   - 毛利率稳定（CV < 15%）= 定价权
+#   - 5 年 ROE 全部 > 12% = Buffett 持续高回报标准
+
+_moat_cache: dict = {}
+_MOAT_TTL = 24 * 3600   # 24 小时缓存（年报变化慢）
+
+def _fetch_moat_metrics(ticker):
+    """返回 dict: roic_avg, roic_years, gm_mean, gm_cv, roe_consistency_yrs, moat_score(0-100)"""
+    cached = _moat_cache.get(ticker)
+    if cached and _time.time() - cached[0] < _MOAT_TTL:
+        return cached[1]
+    try:
+        import yfinance as yf, pandas as pd, numpy as np
+        result = [None]
+        def _do():
+            try:
+                t = yf.Ticker(ticker)
+                inc = t.income_stmt
+                bal = t.balance_sheet
+                if inc is None or bal is None or inc.empty or bal.empty:
+                    return
+                result[0] = (inc, bal)
+            except: pass
+        import threading as _th
+        th = _th.Thread(target=_do, daemon=True)
+        th.start(); th.join(timeout=10)
+        if result[0] is None:
+            _moat_cache[ticker] = (_time.time(), None)
+            return None
+        inc, bal = result[0]
+
+        def _row(df, keys):
+            for k in (keys if isinstance(keys, list) else [keys]):
+                if k in df.index:
+                    return df.loc[k]
+            return None
+
+        ebit = _row(inc, ["EBIT", "Operating Income"])
+        tax_rate = _row(inc, ["Tax Rate For Calcs"])
+        gp = _row(inc, ["Gross Profit"])
+        rev = _row(inc, ["Total Revenue", "Revenue"])
+        ni = _row(inc, ["Net Income"])
+        invested_cap = _row(bal, ["Invested Capital"])
+        equity = _row(bal, ["Stockholders Equity", "Common Stock Equity"])
+        total_debt = _row(bal, ["Total Debt"])
+
+        # 1) ROIC 5 年（NOPAT / Invested Capital）
+        roic_list = []
+        if ebit is not None and invested_cap is not None:
+            for col in ebit.index:
+                e = ebit.get(col)
+                ic = invested_cap.get(col) if col in invested_cap.index else None
+                tr = tax_rate.get(col) if (tax_rate is not None and col in tax_rate.index) else None
+                if e is None or ic is None or pd.isna(e) or pd.isna(ic) or ic <= 0:
+                    continue
+                # tax 0 用 21% 默认；负 tax 视为无意义用 21%
+                t_eff = float(tr) if (tr is not None and not pd.isna(tr) and 0 < float(tr) < 0.5) else 0.21
+                nopat = float(e) * (1 - t_eff)
+                roic = nopat / float(ic) * 100
+                roic_list.append(round(roic, 2))
+        roic_avg = round(sum(roic_list) / len(roic_list), 2) if roic_list else None
+        roic_years_above_15 = sum(1 for r in roic_list if r > 15)
+
+        # 2) 毛利率 5 年稳定性（CV = std/mean）
+        gm_list = []
+        if gp is not None and rev is not None:
+            for col in gp.index:
+                g = gp.get(col)
+                r = rev.get(col) if col in rev.index else None
+                if g is None or r is None or pd.isna(g) or pd.isna(r) or r <= 0: continue
+                gm_list.append(float(g) / float(r) * 100)
+        gm_mean = round(sum(gm_list) / len(gm_list), 1) if gm_list else None
+        if gm_list and len(gm_list) >= 3 and gm_mean and gm_mean > 0:
+            std = float(np.std(gm_list))
+            gm_cv = round(std / gm_mean * 100, 2)
+        else:
+            gm_cv = None
+
+        # 3) 5 年 ROE 持续性
+        roe_list = []
+        if ni is not None and equity is not None:
+            for col in ni.index:
+                n = ni.get(col)
+                eq = equity.get(col) if col in equity.index else None
+                if n is None or eq is None or pd.isna(n) or pd.isna(eq) or eq <= 0:
+                    continue
+                roe_list.append(float(n) / float(eq) * 100)
+        roe_years_above_15 = sum(1 for r in roe_list if r > 15)
+        roe_years_above_12 = sum(1 for r in roe_list if r > 12)
+        roe_avg = round(sum(roe_list) / len(roe_list), 2) if roe_list else None
+        n_years = len(roe_list)
+
+        # 4) 综合护城河评分（0-100）
+        score_parts = []
+        # ROIC 维度（>15% 历史均值 = 强护城河）
+        if roic_avg is not None:
+            # ROIC 5%→0, 10%→40, 15%→70, 20%→90, 25%+→100
+            score_parts.append(_clamp((roic_avg - 5) * 5))
+        # 毛利稳定性（CV < 10% 优秀 / < 20% 一般 / >30 差）
+        if gm_cv is not None:
+            score_parts.append(_clamp(100 - gm_cv * 3))
+        # 毛利水平（高毛利 = 定价权）
+        if gm_mean is not None:
+            # 20%→30, 40%→60, 60%→90, 80%+→100
+            score_parts.append(_clamp(10 + gm_mean * 1.2))
+        # ROE 持续性（5 年中有几年 > 15%）
+        if n_years > 0:
+            score_parts.append(roe_years_above_15 / n_years * 100)
+
+        moat_score = round(sum(score_parts) / len(score_parts), 1) if score_parts else None
+
+        # 护城河等级（Morningstar 风格）
+        if moat_score is None:
+            tier = None
+        elif moat_score >= 75:
+            tier = "Wide"
+        elif moat_score >= 50:
+            tier = "Narrow"
+        else:
+            tier = "None"
+
+        data = {
+            "roic_avg":       roic_avg,
+            "roic_recent":    roic_list[0] if roic_list else None,
+            "roic_years":     len(roic_list),
+            "roic_above_15":  roic_years_above_15,
+            "gm_mean":        gm_mean,
+            "gm_cv":          gm_cv,
+            "roe_avg":        roe_avg,
+            "roe_above_15":   roe_years_above_15,
+            "roe_above_12":   roe_years_above_12,
+            "roe_years":      n_years,
+            "moat_score":     moat_score,
+            "moat_tier":      tier,
+        }
+        _moat_cache[ticker] = (_time.time(), data)
+        return data
+    except Exception:
+        _moat_cache[ticker] = (_time.time(), None)
+        return None
+
+def _parallel_moat(tickers, pct_start, pct_end, workers=8):
+    """并行拉护城河指标"""
+    results = {}
+    done = [0]; total = len(tickers)
+    if total == 0: return results
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {ex.submit(_fetch_moat_metrics, t): t for t in tickers}
+        for f in as_completed(futs):
+            done[0] += 1
+            pct = pct_start + int(done[0] / total * (pct_end - pct_start))
+            log(f"护城河 {done[0]}/{total}…", pct)
+            try:
+                t = futs[f]
+                results[t] = f.result()
+            except: pass
+    return results
+
 # ─── 前10诊断：相关性 + 板块占比 ──────────────────────────────────────────────
 
 def _diagnose_top10(df, prices):
@@ -1847,7 +2008,7 @@ def _fetch_news_count(ticker, days=14):
 def _clamp(v, lo=0, hi=100):
     return max(lo, min(hi, v))
 
-def _score_one(rank, total, info, ps_stats, ticker, prices, news_count):
+def _score_one(rank, total, info, ps_stats, ticker, prices, news_count, moat=None):
     """计算一只股票的 5 维评分。返回 dict[dim -> 0-100]"""
     import pandas as pd, numpy as np
     # 1) logic: 线性 100 → 5（rank=1 → 100, rank=20 → 5）
@@ -1944,8 +2105,15 @@ def _score_one(rank, total, info, ps_stats, ticker, prices, news_count):
             else: t_parts.append(_clamp(40 + r * 0.5))  # <30 超卖
     technical = round(sum(t_parts) / len(t_parts), 1) if t_parts else 50.0
 
-    # 综合分：权重可调
-    composite = round(0.30 * logic + 0.25 * fundamental + 0.15 * management + 0.10 * news + 0.20 * technical, 1)
+    # 综合分：6 维加权
+    # 护城河缺失时降级到 5 维
+    moat_score = (moat or {}).get("moat_score") if moat else None
+    if moat_score is not None:
+        composite = round(
+            0.25 * logic + 0.20 * fundamental + 0.15 * moat_score +
+            0.12 * management + 0.08 * news + 0.20 * technical, 1)
+    else:
+        composite = round(0.30 * logic + 0.25 * fundamental + 0.15 * management + 0.10 * news + 0.20 * technical, 1)
 
     return {
         "score_total":       composite,
@@ -1954,6 +2122,9 @@ def _score_one(rank, total, info, ps_stats, ticker, prices, news_count):
         "score_management":  management,
         "score_news":        news,
         "score_technical":   technical,
+        "score_moat":        moat_score,
+        "moat_tier":         (moat or {}).get("moat_tier") if moat else None,
+        "moat_metrics":      moat,
         "news_count_14d":    int(news_count or 0),
     }
 
@@ -1962,23 +2133,24 @@ def _add_scores(df, prices, top_n=20):
     if df.empty: return df
 
     for col in ("score_total","score_logic","score_fundamental","score_management",
-                "score_news","score_technical","news_count_14d"):
+                "score_news","score_technical","score_moat","moat_tier",
+                "moat_metrics","news_count_14d"):
         df[col] = None
 
     top_idx = list(df.head(top_n).index)
     top_tickers = df.loc[top_idx, "ticker"].tolist()
     if not top_tickers: return df
 
-    # 并发拉 info（命中现有缓存就快）
+    # 并发拉 info
     INFO_FIELDS = [
         "returnOnEquity","profitMargins","revenueGrowth","debtToEquity",
         "institutionsPercentHeld","heldPercentInsiders","recommendationMean",
         "numberOfAnalystOpinions","targetMeanPrice","currentPrice",
     ]
-    infos = _parallel_info(top_tickers, INFO_FIELDS, "评分基本面", 96, 98, workers=20)
+    infos = _parallel_info(top_tickers, INFO_FIELDS, "评分基本面", 94, 96, workers=20)
 
-    # 并发拉 news count（独立线程池，5s 超时）
-    log("评分：拉取新闻热度…", 98)
+    # 并发拉 news count
+    log("评分：拉取新闻热度…", 96)
     news_map = {}
     with ThreadPoolExecutor(max_workers=10) as ex:
         futs = {ex.submit(_fetch_news_count, t, 14): t for t in top_tickers}
@@ -1987,11 +2159,16 @@ def _add_scores(df, prices, top_n=20):
             try: news_map[t] = f.result()
             except: news_map[t] = 0
 
+    # 并发拉护城河指标（5 年财报，命中缓存就快）
+    moat_map = _parallel_moat(top_tickers, 96, 99, workers=8)
+
     total = len(top_idx)
     for i in top_idx:
         ticker = df.at[i, "ticker"]
         rank   = df.at[i, "rank"] if "rank" in df.columns else top_idx.index(i) + 1
-        scores = _score_one(int(rank), total, infos.get(ticker, {}), None, ticker, prices, news_map.get(ticker, 0))
+        scores = _score_one(int(rank), total, infos.get(ticker, {}), None,
+                            ticker, prices, news_map.get(ticker, 0),
+                            moat=moat_map.get(ticker))
         for k, v in scores.items():
             df.at[i, k] = v
     return df

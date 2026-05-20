@@ -742,42 +742,42 @@ const STRAT_META = {
   momentum: {
     desc: "月度收益率算术均值，捕捉持续上涨趋势；适合趋势明确的牛市行情",
     sortKey: "mom_mean", sortAsc: false,
-    cols: ["rank","score_total","ticker","sector","price","mom_mean","total_ret","sharpe","max_dd","short_float","inst_hold","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
+    cols: ["rank","score_total","moat_tier","ticker","sector","price","mom_mean","total_ret","sharpe","max_dd","short_float","inst_hold","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
   },
   momentum_quality: {
     desc: "动量(50%) + ROE(30%) + 净利润率(20%) 综合打分，过滤基本面差的动量股",
     sortKey: "composite", sortAsc: false,
-    cols: ["rank","score_total","ticker","sector","price","composite","mom_mean","roe","profit_margin","max_dd","short_float","inst_hold","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
+    cols: ["rank","score_total","moat_tier","ticker","sector","price","composite","mom_mean","roe","profit_margin","max_dd","short_float","inst_hold","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
   },
   low_vol: {
     desc: "以 Beta 和年化波动率升序排列，优先低风险品种；适合震荡市或防御配置",
     sortKey: "beta", sortAsc: true,
-    cols: ["rank","score_total","ticker","sector","price","beta","ann_vol","total_ret","mom_mean","max_dd","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
+    cols: ["rank","score_total","moat_tier","ticker","sector","price","beta","ann_vol","total_ret","mom_mean","max_dd","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
   },
   piotroski: {
     desc: "Piotroski F-Score：9项财务健康指标（盈利/杠杆/效率各3项），满分9分",
     sortKey: "fscore", sortAsc: false,
-    cols: ["rank","score_total","ticker","sector","price","fscore","f_profit","f_leverage","f_efficiency","roa","gross_margin","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
+    cols: ["rank","score_total","moat_tier","ticker","sector","price","fscore","f_profit","f_leverage","f_efficiency","roa","gross_margin","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
   },
   dual_momentum: {
     desc: "两层过滤：① 绝对动量 — 总收益 > 3M国债收益率，不过线的排到末尾；② 剩余按相对动量排序",
     sortKey: "mom_mean", sortAsc: false,
-    cols: ["rank","score_total","ticker","sector","price","abs_pass","mom_mean","rf_hurdle","total_ret","sharpe","max_dd","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
+    cols: ["rank","score_total","moat_tier","ticker","sector","price","abs_pass","mom_mean","rf_hurdle","total_ret","sharpe","max_dd","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
   },
   multifactor: {
     desc: "多因子 Z-Score 合成：动量35% + ROE25% + 净利润率15% + 低Beta15% + 低PS10%",
     sortKey: "mf_score", sortAsc: false,
-    cols: ["rank","score_total","ticker","sector","price","mf_score","mom_mean","roe","profit_margin","beta","ps","short_float","inst_hold","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
+    cols: ["rank","score_total","moat_tier","ticker","sector","price","mf_score","mom_mean","roe","profit_margin","beta","ps","short_float","inst_hold","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
   },
   high52w: {
     desc: "George & Hwang 2004（JoF）：距52周高点越近的股票未来半年至一年持续走强；双重过滤=200日均线之上+正向月动量",
     sortKey: "dist_high", sortAsc: false,
-    cols: ["rank","score_total","ticker","sector","price","dist_high","passed","high_52w","from_low","above_ma200","mom_mean","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
+    cols: ["rank","score_total","moat_tier","ticker","sector","price","dist_high","passed","high_52w","from_low","above_ma200","mom_mean","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
   },
   connors_rsi: {
     desc: "Larry Connors 多周期短线：日线 RSI(2)<5 + 周线 RSI(14)>50（趋势仍向上）+ 200日均线之上 → 买入信号，反弹至 MA5 卖出",
     sortKey: "rsi2", sortAsc: true,
-    cols: ["rank","score_total","ticker","sector","price","signal","rsi2","rsi14","weekly_rsi","weekly_bullish","from_ma200","ma5","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
+    cols: ["rank","score_total","moat_tier","ticker","sector","price","signal","rsi2","rsi14","weekly_rsi","weekly_bullish","from_ma200","ma5","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
   },
 };
 
@@ -908,15 +908,30 @@ const COL_DEF = {
     if(v==null) return '<span class="neu">—</span>';
     const c = v>=70?'#15803d':v>=50?'#d97706':'#b91c1c';
     const bg = v>=70?'rgba(22,163,74,.10)':v>=50?'rgba(217,119,6,.10)':'rgba(220,38,38,.08)';
+    const dims = [r.score_logic, r.score_fundamental, r.score_moat, r.score_management, r.score_news, r.score_technical];
     return `<div style="display:flex;align-items:center;gap:6px">
       <span style="background:${bg};color:${c};font-weight:800;padding:3px 8px;border-radius:4px;font-size:13px;font-variant-numeric:tabular-nums">${v}</span>
-      <div style="display:flex;gap:1px;flex:1;max-width:60px">
-        ${[r.score_logic, r.score_fundamental, r.score_management, r.score_news, r.score_technical].map(s=>{
-          const h = (s||0) * 0.25;
-          const sc = (s||0)>=70?'var(--green)':(s||0)>=50?'var(--amber)':'var(--red)';
+      <div style="display:flex;gap:1px;flex:1;max-width:72px">
+        ${dims.map(s=>{
+          if (s == null) return '<div style="width:9px;height:25px;background:var(--surface2);border-radius:1px;opacity:.3"></div>';
+          const h = s * 0.25;
+          const sc = s>=70?'var(--green)':s>=50?'var(--amber)':'var(--red)';
           return `<div style="width:9px;height:25px;background:var(--surface2);border-radius:1px;position:relative;overflow:hidden"><div style="position:absolute;bottom:0;width:100%;height:${h}%;background:${sc}"></div></div>`;
         }).join('')}
       </div>
+    </div>`;
+  }},
+  moat_tier:    { label:'护城河', fmt:(v,r)=>{
+    if(!v) return '<span class="neu">—</span>';
+    const map = {Wide:['#15803d','rgba(22,163,74,.10)','⭐ Wide'],
+                 Narrow:['#d97706','rgba(217,119,6,.10)','◇ Narrow'],
+                 None:['#9ca3af','var(--surface2)','— None']};
+    const m = map[v] || map.None;
+    const roic = r.moat_metrics?.roic_avg;
+    const sub = roic != null ? `<div style="font-size:9px;color:var(--text3);margin-top:1px">ROIC ${roic}%</div>` : '';
+    return `<div style="display:flex;flex-direction:column;gap:1px">
+      <span style="background:${m[1]};color:${m[0]};font-weight:700;padding:2px 6px;border-radius:3px;font-size:11px;display:inline-block">${m[2]}</span>
+      ${sub}
     </div>`;
   }},
   news_count_14d:{ label:'新闻(14d)', fmt:(v)=>{
@@ -2200,7 +2215,15 @@ function renderDetail({info,prices}, row) {
   if (row.score_total != null) {
     const tot = row.score_total;
     const ringC = tot>=70?'var(--green)':tot>=50?'var(--amber)':'var(--red)';
-    const dims = [
+    const hasMoat = row.score_moat != null;
+    const dims = hasMoat ? [
+      ['逻辑',   row.score_logic],
+      ['基本面', row.score_fundamental],
+      ['护城河', row.score_moat],
+      ['股东',   row.score_management],
+      ['资讯',   row.score_news],
+      ['技术面', row.score_technical],
+    ] : [
       ['逻辑',   row.score_logic],
       ['基本面', row.score_fundamental],
       ['股东',   row.score_management],
@@ -2208,6 +2231,41 @@ function renderDetail({info,prices}, row) {
       ['技术面', row.score_technical],
     ];
     const tier = tot>=70?'强烈推荐':tot>=55?'值得关注':tot>=40?'平淡':'风险偏高';
+    const weightDesc = hasMoat
+      ? '6 维加权（逻辑25%·基本面20%·技术20%·护城河15%·股东12%·资讯8%）'
+      : '5 维加权（逻辑30%·基本面25%·技术20%·股东15%·资讯10%）';
+    const m = row.moat_metrics;
+    const tierMap = {Wide:['#15803d','rgba(22,163,74,.10)','⭐ Wide Moat','宽护城河'],
+                     Narrow:['#d97706','rgba(217,119,6,.10)','◇ Narrow Moat','窄护城河'],
+                     None:['#9ca3af','var(--surface2)','— No Moat','无护城河']};
+    const tinfo = (m && row.moat_tier && tierMap[row.moat_tier]) ? tierMap[row.moat_tier] : null;
+    const moatBlock = (m && tinfo) ? `
+      <div style="margin-top:10px;padding:10px 12px;background:${tinfo[1]};border:1px solid var(--border);border-radius:6px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <span style="font-size:12px;font-weight:800;color:${tinfo[0]}">${tinfo[2]} · ${tinfo[3]}</span>
+          <span style="font-size:11px;color:var(--text3)">基于近 ${m.roic_years || 5} 年财报</span>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;font-size:11px">
+          <div style="background:var(--surface);padding:6px 8px;border-radius:4px">
+            <div style="color:var(--text3);font-size:9px;font-weight:700;text-transform:uppercase">ROIC 5年均值</div>
+            <div style="font-weight:800;font-size:14px;color:${m.roic_avg>=15?tinfo[0]:'var(--text)'};font-variant-numeric:tabular-nums">${m.roic_avg ?? '—'}%</div>
+            <div style="color:var(--text3);font-size:10px;margin-top:1px">${m.roic_above_15 ?? '—'}/${m.roic_years ?? '—'} 年 &gt; 15%</div>
+          </div>
+          <div style="background:var(--surface);padding:6px 8px;border-radius:4px">
+            <div style="color:var(--text3);font-size:9px;font-weight:700;text-transform:uppercase">毛利率均值/稳定性</div>
+            <div style="font-weight:800;font-size:14px;font-variant-numeric:tabular-nums">${m.gm_mean ?? '—'}<span style="font-size:10px;color:var(--text3)">%</span></div>
+            <div style="color:${m.gm_cv!=null&&m.gm_cv<15?tinfo[0]:'var(--text3)'};font-size:10px;margin-top:1px">CV ${m.gm_cv ?? '—'}% (越低越稳)</div>
+          </div>
+          <div style="background:var(--surface);padding:6px 8px;border-radius:4px">
+            <div style="color:var(--text3);font-size:9px;font-weight:700;text-transform:uppercase">ROE 持续性</div>
+            <div style="font-weight:800;font-size:14px;font-variant-numeric:tabular-nums">${m.roe_avg ?? '—'}%</div>
+            <div style="color:${m.roe_above_15===m.roe_years?tinfo[0]:'var(--text3)'};font-size:10px;margin-top:1px">${m.roe_above_15 ?? '—'}/${m.roe_years ?? '—'} 年 &gt; 15%</div>
+          </div>
+        </div>
+        <div style="margin-top:8px;font-size:10px;color:var(--text3);line-height:1.5">
+          💎 Wide = ROIC 持续 &gt; 15% + 毛利稳定 + ROE 持续高 · Morningstar/Buffett 标准
+        </div>
+      </div>` : '';
     scoreCard = `
       <div class="sec-head">多维评分 · 当前策略 #${row.rank}</div>
       <div class="score-total-big">
@@ -2217,7 +2275,7 @@ function renderDetail({info,prices}, row) {
         </div>
         <div>
           <div style="font-size:14px;font-weight:800;color:${ringC}">${tier}</div>
-          <div style="font-size:11px;color:var(--text3);margin-top:3px">5 维加权评分（逻辑30%·基本面25%·技术面20%·股东15%·资讯10%）</div>
+          <div style="font-size:11px;color:var(--text3);margin-top:3px">${weightDesc}</div>
         </div>
       </div>
       <div class="score-radar"><canvas id="rdr-${row.ticker}"></canvas></div>
@@ -2227,10 +2285,11 @@ function renderDetail({info,prices}, row) {
           return `<div class="score-dim"><div class="score-dim-lbl">${n}</div><div class="score-dim-val ${c}">${v??'—'}</div></div>`;
         }).join('')}
       </div>
+      ${moatBlock}
       ${row.news_count_14d != null ? `<div style="font-size:11px;color:var(--text3);text-align:right;margin-top:4px">近14日新闻 <b style="color:var(--text2)">${row.news_count_14d}</b> 条</div>` : ''}`;
   }
 
-  if (row.target!=null && row.stop!=null) {
+    if (row.target!=null && row.stop!=null) {
     const price = row.price;
     const stop = row.stop;
     const tLow  = row.target_low  != null ? row.target_low  : row.target;
@@ -2497,15 +2556,23 @@ function renderDetail({info,prices}, row) {
   drawChart(cid, prices, document.getElementById('cl'));
   // 自动算一次仓位
   setTimeout(()=>{ if(row.ticker && row.stop!=null) computeSize(row.ticker); }, 100);
-  // 画雷达图
+  // 画雷达图（有护城河时 6 维，否则 5 维）
   if (row.score_total != null) {
-    setTimeout(()=>drawRadar('rdr-'+row.ticker, [
+    const dims = row.score_moat != null ? [
+      ['逻辑', row.score_logic],
+      ['基本面', row.score_fundamental],
+      ['护城河', row.score_moat],
+      ['股东', row.score_management],
+      ['资讯', row.score_news],
+      ['技术面', row.score_technical],
+    ] : [
       ['逻辑', row.score_logic],
       ['基本面', row.score_fundamental],
       ['股东', row.score_management],
       ['资讯', row.score_news],
       ['技术面', row.score_technical],
-    ]), 50);
+    ];
+    setTimeout(()=>drawRadar('rdr-'+row.ticker, dims), 50);
   }
 }
 
