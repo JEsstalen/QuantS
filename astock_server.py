@@ -48,7 +48,9 @@ _CACHE_TTL = 4 * 3600
 # ─── 股票池 ──────────────────────────────────────────────────────────────────
 
 def fetch_universe(scope="hs300_zz500"):
-    """scope: hs300 / zz500 / hs300_zz500"""
+    """scope: hs300 / zz500 / hs300_zz500
+    返回 meta DataFrame: symbol, name, index, sector, pe, pb, market_cap, turnover, qb (量比)
+    """
     import akshare as ak
     import pandas as pd
 
@@ -62,7 +64,7 @@ def fetch_universe(scope="hs300_zz500"):
         log("获取沪深 300 成分股…", 5)
         try:
             df = ak.index_stock_cons_csindex(symbol="000300")
-            df = df.rename(columns={"成分券代码": "symbol", "成分券名称": "name", "交易所英文名称": "ex"})
+            df = df.rename(columns={"成分券代码": "symbol", "成分券名称": "name"})
             df["index"] = "沪深300"
             frames.append(df[["symbol", "name", "index"]])
         except Exception as e:
@@ -81,18 +83,31 @@ def fetch_universe(scope="hs300_zz500"):
         raise RuntimeError("无法获取成分股")
     meta = pd.concat(frames, ignore_index=True)
     meta = meta.drop_duplicates(subset="symbol", keep="first").reset_index(drop=True)
-    # 补充板块（行业）信息
-    log("补充行业分类…", 12)
+
+    # 补充行业 + 估值 + 市值 + 量比 + 换手率（来自实时快照）
+    log("补充行业/估值/市值/量比…", 12)
     try:
-        ind = ak.stock_individual_info_em
-        # 用 stock_zh_a_spot_em 含行业列
         spot = ak.stock_zh_a_spot_em()
-        spot = spot.rename(columns={"代码": "symbol", "所处行业": "sector"})
-        sector_map = dict(zip(spot["symbol"].astype(str), spot["sector"]))
-        meta["sector"] = meta["symbol"].astype(str).map(sector_map).fillna("未知")
+        # 列：代码/名称/最新价/涨跌幅/...所处行业/市盈率-动态/市净率/总市值/流通市值/换手率/量比
+        rename_map = {
+            "代码": "_sym", "所处行业": "sector",
+            "市盈率-动态": "pe", "市净率": "pb",
+            "总市值": "market_cap", "流通市值": "circ_cap",
+            "换手率": "turnover", "量比": "qb",
+            "60日涨跌幅": "ret_60d",
+        }
+        spot = spot.rename(columns=rename_map)
+        spot["_sym"] = spot["_sym"].astype(str)
+        keep = ["_sym","sector","pe","pb","market_cap","circ_cap","turnover","qb","ret_60d"]
+        keep = [c for c in keep if c in spot.columns]
+        spot = spot[keep].set_index("_sym")
+        meta["symbol"] = meta["symbol"].astype(str)
+        meta = meta.merge(spot, how="left", left_on="symbol", right_index=True)
     except Exception as e:
-        log(f"行业分类失败：{e}", -1)
-        meta["sector"] = "未知"
+        log(f"行业/估值合并失败：{e}", -1)
+        for c in ("sector","pe","pb","market_cap","circ_cap","turnover","qb","ret_60d"):
+            if c not in meta.columns: meta[c] = None
+    meta["sector"] = meta["sector"].fillna("未知")
 
     _universe_cache.update(ts=time.time(), data=meta, key=key)
     log(f"股票池就绪：{len(meta)} 只", 15)
@@ -380,6 +395,169 @@ STRATEGIES = {
                     "月度收益率均值降序，最纯粹的中线趋势策略"),
 }
 
+# ─── 筛选器 ───────────────────────────────────────────────────────────────────
+# 接收 dict 参数，对策略结果做过滤：
+#   pe_min/pe_max     - 市盈率区间
+#   pb_min/pb_max     - 市净率区间
+#   cap_min/cap_max   - 总市值区间（亿元）
+#   turnover_min      - 换手率最小值 %
+#   qb_min            - 量比最小值
+#   exclude_st        - 排除 ST/退市股票（名称含 ST/退）
+#   max_mom_dd        - 最大回撤上限（%，负数）
+
+def apply_filters(df, filters):
+    if df is None or df.empty or not filters:
+        return df
+    import pandas as pd
+    f = filters
+    cond = pd.Series(True, index=df.index)
+
+    def _nn(col):
+        return col if col in df.columns else None
+
+    pe_col = _nn("pe")
+    pb_col = _nn("pb")
+    cap_col = _nn("market_cap")
+    if f.get("pe_min") is not None and pe_col:
+        cond &= (df[pe_col].fillna(-1) >= f["pe_min"])
+    if f.get("pe_max") is not None and pe_col:
+        cond &= (df[pe_col].fillna(99999) <= f["pe_max"])
+    if f.get("pb_min") is not None and pb_col:
+        cond &= (df[pb_col].fillna(-1) >= f["pb_min"])
+    if f.get("pb_max") is not None and pb_col:
+        cond &= (df[pb_col].fillna(99999) <= f["pb_max"])
+    if f.get("cap_min") is not None and cap_col:
+        # market_cap 单位：元，转亿元
+        cond &= (df[cap_col].fillna(0) / 1e8 >= f["cap_min"])
+    if f.get("cap_max") is not None and cap_col:
+        cond &= (df[cap_col].fillna(0) / 1e8 <= f["cap_max"])
+    if f.get("turnover_min") is not None and _nn("turnover"):
+        cond &= (df["turnover"].fillna(0) >= f["turnover_min"])
+    if f.get("qb_min") is not None and _nn("qb"):
+        cond &= (df["qb"].fillna(0) >= f["qb_min"])
+    if f.get("exclude_st") and "name" in df.columns:
+        cond &= ~df["name"].fillna("").str.contains(r"ST|退|\*", regex=True)
+    if f.get("max_mom_dd") is not None and _nn("max_dd"):
+        # max_dd 负数；filter 期待 -20 = 最多 20% 回撤
+        cond &= (df["max_dd"].fillna(-100) >= f["max_mom_dd"])
+    out = df[cond].reset_index(drop=True)
+    if "rank" in out.columns:
+        out["rank"] = range(1, len(out) + 1)
+    return out
+
+
+# ─── 多维评分（A 股 4+1 维）──────────────────────────────────────────────────
+# 5 个维度（0-100）：
+#   logic       策略排名（top1=100, top20=5）
+#   valuation   PE / PB 相对行业，越便宜越好
+#   momentum    月动量 + 60日涨跌幅 + 趋势健康度
+#   capital     量比 + 换手率 + 北向持股变化（资金面）
+#   tech        距 60日高 + Sharpe + 最大回撤
+
+def _clamp(v, lo=0, hi=100):
+    return max(lo, min(hi, v))
+
+def _score_row(rank, total, row):
+    import pandas as pd
+    # 1) logic
+    logic = _clamp(100 - (rank - 1) * (95 / max(total - 1, 1))) if rank else 50
+
+    # 2) valuation: PE / PB 越低越好（但负 PE 视为不计入）
+    v_parts = []
+    pe = row.get("pe")
+    pb = row.get("pb")
+    if pe is not None and pe > 0:
+        # PE 5→100, 20→60, 40→30, 80+→0
+        v_parts.append(_clamp(110 - pe * 1.4))
+    if pb is not None and pb > 0:
+        # PB 1→100, 3→60, 5→30, 10+→0
+        v_parts.append(_clamp(110 - pb * 12))
+    valuation = round(sum(v_parts) / len(v_parts), 1) if v_parts else 50.0
+
+    # 3) momentum: 月动量 + 60日涨跌
+    m_parts = []
+    mom = row.get("mom_mean")
+    if mom is not None:
+        # -5%→0, 0→50, 5%→90
+        m_parts.append(_clamp(50 + mom * 8))
+    r60 = row.get("ret_60d")
+    if r60 is not None:
+        # -20%→0, 0→50, +30%→90
+        m_parts.append(_clamp(50 + r60 * 1.5))
+    tr = row.get("total_ret")
+    if tr is not None:
+        m_parts.append(_clamp(50 + tr * 0.8))
+    momentum_s = round(sum(m_parts) / len(m_parts), 1) if m_parts else 50.0
+
+    # 4) capital：量比 + 换手率 + 北向持股变化
+    c_parts = []
+    qb = row.get("qb")
+    if qb is not None and qb > 0:
+        # 0.8→30, 1.0→50, 1.5→80, 2+→95
+        c_parts.append(_clamp(20 + qb * 35))
+    to = row.get("turnover")
+    if to is not None:
+        # 1%→30, 3%→60, 5%→80, 10%+→95
+        c_parts.append(_clamp(20 + to * 8))
+    nc = row.get("north_chg_20d")
+    if nc is not None:
+        # 0→50, +0.3%→80, -0.3%→20
+        c_parts.append(_clamp(50 + nc * 100))
+    capital_s = round(sum(c_parts) / len(c_parts), 1) if c_parts else 50.0
+
+    # 5) tech：距60日高 + Sharpe + 最大回撤
+    t_parts = []
+    dh = row.get("dist_high")  # breakout 策略才有，距 60日高 %
+    if dh is not None:
+        # 0→100, -5%→60, -15%→20
+        t_parts.append(_clamp(100 + dh * 4))
+    sh = row.get("sharpe")
+    if sh is not None:
+        # 0→40, 1→75, 2+→95
+        t_parts.append(_clamp(40 + sh * 35))
+    md = row.get("max_dd")
+    if md is not None:
+        # -5%→90, -15%→60, -30%→20
+        t_parts.append(_clamp(100 + md * 3))
+    vr = row.get("vol_ratio")
+    if vr is not None:
+        t_parts.append(_clamp(30 + vr * 25))
+    tech_s = round(sum(t_parts) / len(t_parts), 1) if t_parts else 50.0
+
+    # 综合：权重
+    composite = round(
+        0.30 * logic +
+        0.20 * valuation +
+        0.20 * momentum_s +
+        0.15 * capital_s +
+        0.15 * tech_s, 1)
+
+    return {
+        "score_total":     composite,
+        "score_logic":     round(logic, 1),
+        "score_valuation": valuation,
+        "score_momentum":  momentum_s,
+        "score_capital":   capital_s,
+        "score_tech":      tech_s,
+    }
+
+def add_scores(df, top_n=20):
+    if df is None or df.empty:
+        return df
+    for col in ("score_total","score_logic","score_valuation",
+                "score_momentum","score_capital","score_tech"):
+        df[col] = None
+    total = min(top_n, len(df))
+    for i in range(total):
+        idx = df.index[i]
+        rank = int(df.at[idx, "rank"]) if "rank" in df.columns else i + 1
+        row = df.iloc[i].to_dict()
+        scores = _score_row(rank, total, row)
+        for k, v in scores.items():
+            df.at[idx, k] = v
+    return df
+
+
 # ─── 市场温度（A 股版）──────────────────────────────────────────────────────
 
 _market_cache = {"ts": 0, "data": None}
@@ -603,9 +781,30 @@ def api_run():
 
             fn = STRATEGIES.get(strategy, STRATEGIES["north_money"])[0]
             df = fn(prices_map, meta)
+
+            # 把 meta 里的估值/市值/量比合并到结果（覆盖式 left join）
+            try:
+                merge_cols = [c for c in ("symbol","pe","pb","market_cap","circ_cap","turnover","qb","ret_60d") if c in meta.columns]
+                if "symbol" in df.columns and merge_cols:
+                    df = df.merge(meta[merge_cols], on="symbol", how="left", suffixes=("", "_meta"))
+            except Exception as e:
+                log(f"meta 合并失败：{e}", -1)
+
+            # 应用筛选器（在评分之前，免得评分稀疏）
+            filters = body.get("filters") or {}
+            before = len(df)
+            df = apply_filters(df, filters)
+            after = len(df)
+            if filters:
+                log(f"筛选：{before} → {after} 只", 96)
+
+            # 多维评分（前 20 名）
+            df = add_scores(df, top_n=20)
+
             rows = df.head(100).to_dict(orient="records")
             _broadcast("done", {"rows": rows, "strategy": strategy,
-                                "start": start_date, "end": end_date})
+                                "start": start_date, "end": end_date,
+                                "filtered_in": after, "filtered_total": before})
         except Exception as e:
             import traceback
             traceback.print_exc()
