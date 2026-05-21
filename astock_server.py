@@ -115,37 +115,51 @@ def fetch_universe(scope="hs300_zz500"):
 
 # ─── 行情下载（按月 batch + 缓存）──────────────────────────────────────────
 
-def _load_one_price(symbol, start_date, end_date):
-    """单只历史日 K（前复权）"""
+def _load_one_price(symbol, start_date, end_date, retries=2):
+    """单只历史日 K（前复权），带重试"""
     cached = _prices_cache.get(symbol)
     if cached and time.time() - cached[0] < _CACHE_TTL:
         df = cached[1]
-        if not df.empty and df.index[-1] >= end_date:
-            return df.loc[df.index >= start_date]
+        if df is None: return None  # 之前拉失败已缓存
+        if not df.empty and df.index[-1] >= pd.Timestamp(end_date):
+            return df.loc[df.index >= pd.Timestamp(start_date)]
     import akshare as ak
     import pandas as pd
-    try:
-        # adjust 'qfq' = 前复权
-        df = ak.stock_zh_a_hist(symbol=symbol, period="daily",
-                                start_date=start_date.replace("-", ""),
-                                end_date=end_date.replace("-", ""), adjust="qfq")
-        if df is None or df.empty: return None
-        df = df.rename(columns={"日期": "date", "收盘": "close", "成交量": "volume",
-                                 "成交额": "amount", "最高": "high", "最低": "low",
-                                 "开盘": "open"})
-        df["date"] = pd.to_datetime(df["date"])
-        df = df.set_index("date").sort_index()
-        _prices_cache[symbol] = (time.time(), df)
-        return df
-    except Exception:
-        return None
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            df = ak.stock_zh_a_hist(symbol=symbol, period="daily",
+                                    start_date=start_date.replace("-", ""),
+                                    end_date=end_date.replace("-", ""), adjust="qfq")
+            if df is None or df.empty:
+                _prices_cache[symbol] = (time.time(), None)  # 缓存空结果避免重复尝试
+                return None
+            df = df.rename(columns={"日期": "date", "收盘": "close", "成交量": "volume",
+                                     "成交额": "amount", "最高": "high", "最低": "low",
+                                     "开盘": "open"})
+            df["date"] = pd.to_datetime(df["date"])
+            df = df.set_index("date").sort_index()
+            _prices_cache[symbol] = (time.time(), df)
+            return df
+        except Exception as e:
+            last_err = e
+            if attempt < retries:
+                time.sleep(0.3 * (attempt + 1))   # 0.3s, 0.6s
+                continue
+    # 多次重试失败：短期缓存 None，避免短时间内反复重试
+    _prices_cache[symbol] = (time.time(), None)
+    return None
+
+# import pandas at module level for the cache TTL check above
+import pandas as pd
 
 def load_prices(symbols, start_date, end_date, log_pct_start=15, log_pct_end=50):
     """并发下载多只股票的价格，返回 dict[symbol] -> DataFrame"""
     result = {}
     total = len(symbols)
     done = [0]
-    with ThreadPoolExecutor(max_workers=12) as ex:
+    # 18 workers：纯 I/O，akshare 服务端能扛
+    with ThreadPoolExecutor(max_workers=18) as ex:
         futs = {ex.submit(_load_one_price, s, start_date, end_date): s for s in symbols}
         for f in as_completed(futs):
             done[0] += 1
@@ -185,59 +199,66 @@ def _monthly_stats(df):
 # ─── 北向资金 ─────────────────────────────────────────────────────────────────
 
 def fetch_north_holdings(symbols, log_pct_start=50, log_pct_end=80):
-    """拉取北向资金持股比例近 60 日变化
-    返回 dict[symbol] -> {"north_pct_now": 当前持股%, "north_chg_20d": 20日变化, "north_chg_60d": ...}
-    """
+    """拉取北向资金持股比例近 60 日变化（仅对策略选定的 top 名单）"""
     import akshare as ak
     import pandas as pd
     result = {}
 
-    def _one(symbol):
+    def _one(symbol, retries=1):
         cached = _north_cache.get(symbol)
         if cached and time.time() - cached[0] < _CACHE_TTL:
             return symbol, cached[1]
-        try:
-            # 陆股通持股 - 个股历史（持股比例）
-            df = ak.stock_hsgt_individual_em(symbol=symbol)
-            if df is None or df.empty:
-                return symbol, None
-            # 接口列：持股日期 / 当日收盘价 / 当日涨跌幅 / 持股数量 / 持股市值 / 持股数量占A股百分比 / ...
-            col_pct = None
-            for c in df.columns:
-                if "A股百分比" in c or "持股比例" in c:
-                    col_pct = c; break
-            col_date = None
-            for c in df.columns:
-                if "日期" in c:
-                    col_date = c; break
-            if not col_pct or not col_date:
-                return symbol, None
-            df = df.rename(columns={col_date: "date", col_pct: "pct"})
-            df["date"] = pd.to_datetime(df["date"])
-            df["pct"] = pd.to_numeric(df["pct"], errors="coerce")
-            df = df.dropna(subset=["pct"]).set_index("date").sort_index()
-            if df.empty:
-                return symbol, None
-            pct_now = float(df["pct"].iloc[-1])
-            chg_20d = pct_now - float(df["pct"].iloc[-21]) if len(df) >= 21 else None
-            chg_60d = pct_now - float(df["pct"].iloc[-61]) if len(df) >= 61 else None
-            data = {"north_pct_now": round(pct_now, 3),
-                    "north_chg_20d": round(chg_20d, 3) if chg_20d is not None else None,
-                    "north_chg_60d": round(chg_60d, 3) if chg_60d is not None else None}
-            _north_cache[symbol] = (time.time(), data)
-            return symbol, data
-        except Exception:
-            _north_cache[symbol] = (time.time(), None)
-            return symbol, None
+        last_err = None
+        for attempt in range(retries + 1):
+            try:
+                df = ak.stock_hsgt_individual_em(symbol=symbol)
+                if df is None or df.empty:
+                    _north_cache[symbol] = (time.time(), None)
+                    return symbol, None
+                col_pct = None
+                for c in df.columns:
+                    if "A股百分比" in c or "持股比例" in c:
+                        col_pct = c; break
+                col_date = None
+                for c in df.columns:
+                    if "日期" in c:
+                        col_date = c; break
+                if not col_pct or not col_date:
+                    _north_cache[symbol] = (time.time(), None)
+                    return symbol, None
+                df = df.rename(columns={col_date: "date", col_pct: "pct"})
+                df["date"] = pd.to_datetime(df["date"])
+                df["pct"] = pd.to_numeric(df["pct"], errors="coerce")
+                df = df.dropna(subset=["pct"]).set_index("date").sort_index()
+                if df.empty:
+                    _north_cache[symbol] = (time.time(), None)
+                    return symbol, None
+                pct_now = float(df["pct"].iloc[-1])
+                chg_20d = pct_now - float(df["pct"].iloc[-21]) if len(df) >= 21 else None
+                chg_60d = pct_now - float(df["pct"].iloc[-61]) if len(df) >= 61 else None
+                data = {"north_pct_now": round(pct_now, 3),
+                        "north_chg_20d": round(chg_20d, 3) if chg_20d is not None else None,
+                        "north_chg_60d": round(chg_60d, 3) if chg_60d is not None else None}
+                _north_cache[symbol] = (time.time(), data)
+                return symbol, data
+            except Exception as e:
+                last_err = e
+                if attempt < retries:
+                    time.sleep(0.2 * (attempt + 1))
+                    continue
+        # 重试失败 → 短期缓存 None
+        _north_cache[symbol] = (time.time(), None)
+        return symbol, None
 
     total = len(symbols)
     done = [0]
-    with ThreadPoolExecutor(max_workers=6) as ex:
+    # 北向接口比价格接口慢，提到 10 并发
+    with ThreadPoolExecutor(max_workers=10) as ex:
         futs = {ex.submit(_one, s): s for s in symbols}
         for f in as_completed(futs):
             done[0] += 1
             pct = log_pct_start + int(done[0] / total * (log_pct_end - log_pct_start))
-            if done[0] % 50 == 0 or done[0] == total:
+            if done[0] % 30 == 0 or done[0] == total:
                 log(f"北向资金 {done[0]}/{total}…", pct)
             try:
                 s, d = f.result()
@@ -248,10 +269,12 @@ def fetch_north_holdings(symbols, log_pct_start=50, log_pct_end=80):
 # ─── 策略 1：北向资金动量 ─────────────────────────────────────────────────────
 
 def calc_north_money(prices_map, meta, **kw):
-    """北向资金持续净增加 + 月动量正"""
+    """北向资金持续净增加 + 月动量正
+    优化：先按月动量排序选 top 150，只对这部分拉北向资金（最大耗时点）
+    """
     import pandas as pd
     meta_idx = meta.set_index("symbol")
-    log("策略 1：北向资金动量 - 收集价格指标…", 80)
+    log("策略 1：北向资金动量 - 收集价格指标…", 70)
 
     rows = []
     symbols = list(prices_map.keys())
@@ -266,17 +289,19 @@ def calc_north_money(prices_map, meta, **kw):
             **ps,
         })
 
-    log("策略 1：拉取北向资金持股数据…", 82)
-    north = fetch_north_holdings([r["symbol"] for r in rows], 82, 95)
+    # 仅对预排序的 top 150（按月动量降序）拉北向，节省大量时间
+    rows.sort(key=lambda r: -(r.get("mom_mean") or -999))
+    target_for_north = rows[:150]
+    log(f"策略 1：拉取北向持股（仅前 150 只，节省时间）…", 75)
+    north = fetch_north_holdings([r["symbol"] for r in target_for_north], 75, 95)
     for r in rows:
         n = north.get(r["symbol"], {})
-        r["north_pct_now"] = n.get("north_pct_now")
-        r["north_chg_20d"] = n.get("north_chg_20d")
-        r["north_chg_60d"] = n.get("north_chg_60d")
+        r["north_pct_now"] = n.get("north_pct_now") if n else None
+        r["north_chg_20d"] = n.get("north_chg_20d") if n else None
+        r["north_chg_60d"] = n.get("north_chg_60d") if n else None
 
     # 过滤：北向 20d 净增 > 0 且 月动量 > 0
     valid = [r for r in rows if r.get("north_chg_20d") is not None and r["north_chg_20d"] > 0 and r["mom_mean"] > 0]
-    # 按 北向20日变化 × 1.5 + 月动量 × 1 综合排序
     for r in valid:
         r["north_score"] = round(r["north_chg_20d"] * 1.5 + r["mom_mean"] * 0.5, 3)
     valid.sort(key=lambda x: -x["north_score"])
@@ -777,7 +802,14 @@ def api_run():
             end_date = datetime.now().strftime("%Y-%m-%d")
             start_date = (datetime.now() - timedelta(days=months * 31)).strftime("%Y-%m-%d")
             prices_map = load_prices(symbols, start_date, end_date)
-            log(f"成功下载 {len(prices_map)} 只行情", 55)
+            log(f"成功下载 {len(prices_map)}/{len(symbols)} 只行情", 55)
+
+            # 行情下载失败率高（>50%）→ 明确报错而非让策略静默跑空
+            if len(prices_map) == 0:
+                _broadcast("error", {"msg": f"无法连接 akshare 数据源（0/{len(symbols)} 只成功）— 可能是网络不稳或东方财富接口限频，稍后重试"})
+                return
+            if len(prices_map) < len(symbols) * 0.3:
+                log(f"⚠ 仅 {len(prices_map)}/{len(symbols)} 只下载成功，结果可能不完整", 56)
 
             fn = STRATEGIES.get(strategy, STRATEGIES["north_money"])[0]
             df = fn(prices_map, meta)
