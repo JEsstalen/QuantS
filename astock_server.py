@@ -115,42 +115,93 @@ def fetch_universe(scope="hs300_zz500"):
 
 # ─── 行情下载（按月 batch + 缓存）──────────────────────────────────────────
 
-def _load_one_price(symbol, start_date, end_date, retries=2):
-    """单只历史日 K（前复权），带重试"""
+_source_stats = {"sina": 0, "em": 0, "tx": 0, "fail": 0}
+
+def _symbol_with_prefix(symbol):
+    """000001 → sz000001, 600519 → sh600519, 688981 → sh688981, 832000 → bj832000"""
+    s = str(symbol)
+    if s.startswith("6"): return "sh" + s
+    if s.startswith(("0", "3")): return "sz" + s
+    if s.startswith("8"): return "bj" + s
+    return s
+
+def _fetch_sina(symbol, start_date, end_date):
+    """新浪财经（最稳，是主源）"""
+    import akshare as ak
+    import pandas as pd
+    pfx = _symbol_with_prefix(symbol)
+    df = ak.stock_zh_a_daily(symbol=pfx,
+                             start_date=start_date.replace("-", ""),
+                             end_date=end_date.replace("-", ""), adjust="qfq")
+    if df is None or df.empty: return None
+    # 列：date / open / high / low / close / volume
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.set_index("date").sort_index()
+    return df
+
+def _fetch_em(symbol, start_date, end_date):
+    """东方财富（备用源 1）"""
+    import akshare as ak
+    import pandas as pd
+    df = ak.stock_zh_a_hist(symbol=symbol, period="daily",
+                            start_date=start_date.replace("-", ""),
+                            end_date=end_date.replace("-", ""), adjust="qfq")
+    if df is None or df.empty: return None
+    df = df.rename(columns={"日期": "date", "收盘": "close", "成交量": "volume",
+                             "成交额": "amount", "最高": "high", "最低": "low",
+                             "开盘": "open"})
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.set_index("date").sort_index()
+    return df
+
+def _fetch_tx(symbol, start_date, end_date):
+    """腾讯证券（备用源 2，没有 volume 列，用 amount 兜底）"""
+    import akshare as ak
+    import pandas as pd
+    pfx = _symbol_with_prefix(symbol)
+    df = ak.stock_zh_a_hist_tx(symbol=pfx,
+                               start_date=start_date.replace("-", ""),
+                               end_date=end_date.replace("-", ""), adjust="qfq")
+    if df is None or df.empty: return None
+    # 列：date / open / close / high / low / amount  (无 volume)
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.set_index("date").sort_index()
+    # 用 amount/close 反推近似 volume（粗略，但够策略用）
+    if "volume" not in df.columns and "amount" in df.columns:
+        df["volume"] = df["amount"] / df["close"].replace(0, 1)
+    return df
+
+# 数据源回退链：新浪（最稳）→ 东方财富 → 腾讯
+_PRICE_SOURCES = [
+    ("sina", _fetch_sina),
+    ("em",   _fetch_em),
+    ("tx",   _fetch_tx),
+]
+
+def _load_one_price(symbol, start_date, end_date, retries=0):
+    """单只历史日 K，自动切换数据源"""
+    import pandas as pd
     cached = _prices_cache.get(symbol)
     if cached and time.time() - cached[0] < _CACHE_TTL:
         df = cached[1]
-        if df is None: return None  # 之前拉失败已缓存
+        if df is None: return None
         if not df.empty and df.index[-1] >= pd.Timestamp(end_date):
             return df.loc[df.index >= pd.Timestamp(start_date)]
-    import akshare as ak
-    import pandas as pd
-    last_err = None
-    for attempt in range(retries + 1):
+    # 依次尝试各源，第一个成功即返回
+    for src_name, fn in _PRICE_SOURCES:
         try:
-            df = ak.stock_zh_a_hist(symbol=symbol, period="daily",
-                                    start_date=start_date.replace("-", ""),
-                                    end_date=end_date.replace("-", ""), adjust="qfq")
-            if df is None or df.empty:
-                _prices_cache[symbol] = (time.time(), None)  # 缓存空结果避免重复尝试
-                return None
-            df = df.rename(columns={"日期": "date", "收盘": "close", "成交量": "volume",
-                                     "成交额": "amount", "最高": "high", "最低": "low",
-                                     "开盘": "open"})
-            df["date"] = pd.to_datetime(df["date"])
-            df = df.set_index("date").sort_index()
-            _prices_cache[symbol] = (time.time(), df)
-            return df
-        except Exception as e:
-            last_err = e
-            if attempt < retries:
-                time.sleep(0.3 * (attempt + 1))   # 0.3s, 0.6s
-                continue
-    # 多次重试失败：短期缓存 None，避免短时间内反复重试
+            df = fn(symbol, start_date, end_date)
+            if df is not None and not df.empty:
+                _source_stats[src_name] = _source_stats.get(src_name, 0) + 1
+                _prices_cache[symbol] = (time.time(), df)
+                return df
+        except Exception:
+            continue
+    # 全部源失败
+    _source_stats["fail"] = _source_stats.get("fail", 0) + 1
     _prices_cache[symbol] = (time.time(), None)
     return None
 
-# import pandas at module level for the cache TTL check above
 import pandas as pd
 
 def load_prices(symbols, start_date, end_date, log_pct_start=15, log_pct_end=50):
@@ -158,8 +209,9 @@ def load_prices(symbols, start_date, end_date, log_pct_start=15, log_pct_end=50)
     result = {}
     total = len(symbols)
     done = [0]
-    # 18 workers：纯 I/O，akshare 服务端能扛
-    with ThreadPoolExecutor(max_workers=18) as ex:
+    # 12 workers：新浪接口内部用 py_mini_racer (V8) 解密，并发 >15 在 Windows 下
+    # 会触发 partition_address_space.cc CHECK 失败崩溃，必须保守
+    with ThreadPoolExecutor(max_workers=12) as ex:
         futs = {ex.submit(_load_one_price, s, start_date, end_date): s for s in symbols}
         for f in as_completed(futs):
             done[0] += 1
@@ -819,8 +871,11 @@ def api_run():
 
             end_date = datetime.now().strftime("%Y-%m-%d")
             start_date = (datetime.now() - timedelta(days=months * 31)).strftime("%Y-%m-%d")
+            # 重置数据源计数
+            for k in _source_stats: _source_stats[k] = 0
             prices_map = load_prices(symbols, start_date, end_date)
-            log(f"成功下载 {len(prices_map)}/{len(symbols)} 只行情", 55)
+            srcs = ", ".join([f"{k}={v}" for k,v in _source_stats.items() if v > 0])
+            log(f"成功下载 {len(prices_map)}/{len(symbols)} 只行情 · 数据源: {srcs}", 55)
 
             # 行情下载失败率高（>50%）→ 明确报错而非让策略静默跑空
             if len(prices_map) == 0:
