@@ -555,7 +555,13 @@ tr.selected td:first-child{border-left:2px solid var(--accent);padding-left:10px
 
   <!-- strategy tabs (only in strategy view) -->
   <div class="strategy-bar" id="strategyBar">
-    <span class="term-label term-short">短线 · 2-30天</span>
+    <span class="term-label term-short">短线 · 1-5天</span>
+    <button class="stab" id="stab-ibs" onclick="setStrategy('ibs')">
+      🎯 IBS 反转 <span class="stab-badge">次日</span>
+    </button>
+    <button class="stab" id="stab-pullback_3d" onclick="setStrategy('pullback_3d')">
+      📉 3日回调 <span class="stab-badge">Connors 70%胜率</span>
+    </button>
     <button class="stab" id="stab-connors_rsi" onclick="setStrategy('connors_rsi')">
       ⚡ Connors RSI(2) <span class="stab-badge">超卖反弹</span>
     </button>
@@ -779,6 +785,16 @@ const STRAT_META = {
     sortKey: "rsi2", sortAsc: true,
     cols: ["rank","score_total","moat_tier","ticker","sector","price","signal","rsi2","rsi14","weekly_rsi","weekly_bullish","from_ma200","ma5","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
   },
+  pullback_3d: {
+    desc: "Connors《Short Term Trading Strategies That Work》3 日回调：MA200 之上 + 连续 3 日下跌 + RSI(2)<30 → 收盘买入，反弹至 MA5 卖出。回测胜率 ~70%",
+    sortKey: "rsi2", sortAsc: true,
+    cols: ["rank","score_total","moat_tier","ticker","sector","price","signal","three_down","rsi2","pullback_pct","ma5","ma200","above_ma200","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
+  },
+  ibs: {
+    desc: "Internal Bar Strength：IBS = (Close-Low)/(High-Low)，趋势向上的股票收盘极弱（IBS<0.2）= 次日反弹高概率。今晚收盘买，明日收盘卖。胜率 60-65%",
+    sortKey: "ibs", sortAsc: true,
+    cols: ["rank","score_total","moat_tier","ticker","sector","price","signal","ibs","high","low","ma50","mom_mean","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
+  },
 };
 
 const COL_DEF = {
@@ -868,6 +884,23 @@ const COL_DEF = {
     return `<span class="num ${c}">${v}</span>`;
   }},
   weekly_bullish:{ label:'周线趋势',    fmt:(v)=>v?'<span style="color:var(--green);font-weight:700;font-size:11px">↑ 向上</span>':'<span style="color:var(--red);font-size:11px">↓ 向下</span>' },
+  // pullback_3d
+  three_down:    { label:'3连阴',       fmt:(v)=>v?'<span style="color:var(--green);font-weight:700;font-size:12px">✓</span>':'<span style="color:var(--text3);font-size:12px">—</span>' },
+  pullback_pct:  { label:'距20日高%',  fmt:(v)=>{
+    if (v==null) return '—';
+    const c = v>-3?'neu':v>-7?'a':'pos';   // 回撤越大越红（短线买点）
+    return `<span class="num ${c}">${v}%</span>`;
+  }},
+  // ibs
+  ibs:           { label:'IBS',         fmt:(v)=>{
+    if (v==null) return '<span class="neu">—</span>';
+    const c = v<0.2?'pos':v<0.35?'neu':v>0.8?'neg':'neu';
+    const wt = v<0.2?'700':'500';
+    return `<span class="num ${c}" style="font-weight:${wt}">${v.toFixed(2)}</span>`;
+  }},
+  high:          { label:'当日高',      fmt:(v)=>v!=null?`<span class="num neu">$${v}</span>`:'—' },
+  low:           { label:'当日低',      fmt:(v)=>v!=null?`<span class="num neu">$${v}</span>`:'—' },
+  ma50:          { label:'MA50',        fmt:(v)=>v!=null?`<span class="num neu">$${v}</span>`:'—' },
   // 目标价/止损（仅前10名）
   target:       { label:'目标(低/中/高)', fmt:(v,r)=>{
     if(v==null) return '<span class="neu">—</span>';

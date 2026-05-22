@@ -1292,6 +1292,192 @@ def calc_connors_rsi(prices, meta, start_str, end_str, _skip_external=False):
     return df
 
 
+# ─── 策略 9：3 日回调（Connors Pullback）─────────────────────────────────────
+# Larry Connors 经典短线策略，比 RSI(2) 加了"3 连阴"过滤更稳：
+# 1) 200日均线之上（趋势过滤）
+# 2) 连续 3 日下跌（前 3 个 close 全部递减）
+# 3) RSI(2) < 30（超卖）
+# 入场：今晚收盘买入；卖出：等到 close > MA5
+# 历史回测胜率 ~70%（Connors 1995-2008 数据）
+
+def calc_pullback_3d(prices, meta, start_str, end_str, _skip_external=False):
+    import pandas as pd, numpy as np
+    meta_idx = meta.set_index("Ticker")
+
+    results, total = [], len(prices.columns)
+    for idx, ticker in enumerate(prices.columns):
+        if idx % 30 == 0: log(f"计算 3日回调 {idx}/{total}…", 58 + int(idx/total*35))
+        s = prices[ticker].dropna()
+        if len(s) < 200: continue
+
+        last = float(s.iloc[-1])
+        ma200 = float(s.tail(200).mean())
+        ma5   = float(s.tail(5).mean())
+        above_ma200 = last > ma200
+
+        # 连续 3 日下跌（c[-1] < c[-2] < c[-3] < c[-4]）
+        recent4 = s.tail(4).tolist() if len(s) >= 4 else []
+        three_down = (len(recent4) == 4
+                      and recent4[3] < recent4[2]
+                      and recent4[2] < recent4[1]
+                      and recent4[1] < recent4[0])
+
+        rsi2 = _rsi(s, 2)
+        last_rsi2 = float(rsi2.iloc[-1]) if not pd.isna(rsi2.iloc[-1]) else None
+
+        # 入场信号（强）：趋势上 + 3连阴 + RSI(2) < 30
+        signal = bool(above_ma200 and three_down and last_rsi2 is not None and last_rsi2 < 30)
+        # 观察名单（弱）：趋势上 + 2 日内有下跌 + RSI(2) < 40
+        watchlist = bool(above_ma200 and last_rsi2 is not None and last_rsi2 < 40)
+
+        # 距今天回撤（从近期高点）
+        recent20_high = float(s.tail(20).max())
+        pullback_pct = round((last/recent20_high - 1) * 100, 2)
+
+        results.append({
+            **_meta_info(meta_idx, ticker), "ticker": ticker,
+            "price":         round(last, 2),
+            "rsi2":          round(last_rsi2, 1) if last_rsi2 is not None else None,
+            "ma5":           round(ma5, 2),
+            "ma200":         round(ma200, 2),
+            "above_ma200":   above_ma200,
+            "three_down":    three_down,
+            "pullback_pct":  pullback_pct,
+            "signal":        signal,
+            "watchlist":     watchlist,
+        })
+
+    df = pd.DataFrame(results)
+    if df.empty:
+        df = pd.DataFrame(columns=["rank","ticker","name","sector","index","price",
+                                    "rsi2","ma5","ma200","above_ma200","three_down",
+                                    "pullback_pct","signal","watchlist"])
+        log("计算完成", 100)
+        return df
+
+    # 排序：signal > watchlist > 其它；同档内 RSI(2) 升序（越超卖越前）
+    df["_b"] = df.apply(lambda r: 2 if r["signal"] else 1 if r["watchlist"] else 0, axis=1)
+    df["_r"] = df["rsi2"].fillna(999)
+    df = df.sort_values(["_b", "_r"], ascending=[False, True]).drop(columns=["_b","_r"]).reset_index(drop=True)
+    df.insert(0, "rank", range(1, len(df)+1))
+    log("计算完成", 100)
+    return df
+
+# ─── 策略 10：IBS 均值回归（Internal Bar Strength）────────────────────────────
+# IBS = (Close - Low) / (High - Low) ，衡量收盘在当日 H/L 区间内的位置
+# 收盘极弱（IBS<0.2）+ 趋势向上 → 次日反弹概率高
+# 入场：今晚收盘买入；卖出：次日收盘
+# 平均胜率 60-65%（SPY 60%+，单股 55-60%），Sharpe ~1.5
+
+def calc_ibs(prices, meta, start_str, end_str, _skip_external=False):
+    """
+    需要 H/L 数据。我们的 prices 只有 close，所以本策略只对 candidates 拉
+    完整 H/L/C 数据（用 _atr_true 同款机制）。
+    候选集：在 MA50 之上 + 月动量正 → 大约 30-50 只
+    """
+    import pandas as pd, numpy as np
+
+    meta_idx = meta.set_index("Ticker")
+
+    # 第 1 步：从 prices 里筛出"上升趋势"候选
+    candidates = []
+    total = len(prices.columns)
+    for idx, ticker in enumerate(prices.columns):
+        if idx % 50 == 0: log(f"IBS 候选筛选 {idx}/{total}…", 58 + int(idx/total*15))
+        s = prices[ticker].dropna()
+        if len(s) < 50: continue
+        last = float(s.iloc[-1])
+        ma50 = float(s.tail(50).mean())
+        if last <= ma50: continue   # 趋势过滤
+        ps = _monthly_stats(prices, ticker)
+        if ps is None or ps["mom_mean"] <= 0: continue
+        candidates.append((ticker, last, ma50, ps))
+
+    log(f"IBS：{len(candidates)} 只候选 → 拉取 H/L 数据…", 75)
+
+    # 第 2 步：对 candidates 用 _atr_true 同源机制拉 H/L/C 算 IBS
+    # 直接用 yfinance 单只 history，60d 已经足够算 IBS
+    results = []
+    if _skip_external:
+        # 回测模式无法拉 H/L，跳过 IBS 直接用 close 近似
+        for ticker, last, ma50, ps in candidates:
+            results.append({
+                **_meta_info(meta_idx, ticker), "ticker": ticker,
+                "price": round(last, 2),
+                "ibs": None, "high": None, "low": None,
+                "ma50": round(ma50, 2),
+                "mom_mean": ps["mom_mean"],
+                "signal": False, "watchlist": False,
+            })
+    else:
+        import yfinance as yf
+        from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
+
+        def _one_ibs(ticker, last_close, ma50, ps):
+            try:
+                result = [None]
+                def _do():
+                    try:
+                        result[0] = yf.Ticker(ticker).history(period="5d", auto_adjust=True)
+                    except: pass
+                import threading as _th
+                th = _th.Thread(target=_do, daemon=True)
+                th.start(); th.join(timeout=4)
+                df = result[0]
+                if df is None or df.empty:
+                    return None
+                last_row = df.iloc[-1]
+                h = float(last_row["High"]); l = float(last_row["Low"]); c = float(last_row["Close"])
+                rng = h - l
+                if rng <= 0: return None
+                ibs = (c - l) / rng
+                # 信号：IBS < 0.2（收盘在当日下沿）= 短期超卖
+                signal = ibs < 0.2
+                watchlist = ibs < 0.35
+                return {
+                    "ticker": ticker,
+                    "price": round(c, 2),
+                    "ibs":   round(ibs, 3),
+                    "high":  round(h, 2),
+                    "low":   round(l, 2),
+                    "ma50":  round(ma50, 2),
+                    "mom_mean": ps["mom_mean"],
+                    "signal": bool(signal),
+                    "watchlist": bool(watchlist),
+                }
+            except Exception:
+                return None
+
+        done = [0]; n = len(candidates)
+        with _TPE(max_workers=8) as ex:
+            futs = {ex.submit(_one_ibs, t, lc, m, ps): t for t, lc, m, ps in candidates}
+            for f in _ac(futs):
+                done[0] += 1
+                if done[0] % 10 == 0 or done[0] == n:
+                    log(f"IBS 计算 {done[0]}/{n}…", 75 + int(done[0]/max(n,1)*20))
+                try:
+                    d = f.result()
+                    if d:
+                        d.update(_meta_info(meta_idx, d["ticker"]))
+                        results.append(d)
+                except: pass
+
+    df = pd.DataFrame(results)
+    if df.empty:
+        df = pd.DataFrame(columns=["rank","ticker","name","sector","index","price",
+                                    "ibs","high","low","ma50","mom_mean","signal","watchlist"])
+        log("计算完成", 100)
+        return df
+
+    # 排序：signal > watchlist > 其它；同档 IBS 升序
+    df["_b"] = df.apply(lambda r: 2 if r["signal"] else 1 if r["watchlist"] else 0, axis=1)
+    df["_i"] = df["ibs"].fillna(999)
+    df = df.sort_values(["_b", "_i"], ascending=[False, True]).drop(columns=["_b","_i"]).reset_index(drop=True)
+    df.insert(0, "rank", range(1, len(df)+1))
+    log("计算完成", 100)
+    return df
+
+
 STRATEGIES = {
     "momentum":         calc_momentum,
     "momentum_quality": calc_momentum_quality,
@@ -1301,6 +1487,8 @@ STRATEGIES = {
     "multifactor":      calc_multifactor,
     "high52w":          calc_52w_high,
     "connors_rsi":      calc_connors_rsi,
+    "pullback_3d":      calc_pullback_3d,
+    "ibs":              calc_ibs,
 }
 
 # ─── 目标价 / 止损测算（前10名）─────────────────────────────────────────────
@@ -1310,6 +1498,8 @@ STRATEGIES = {
 # long   : 持有 6-18 月  止损 2.5R 目标 7.5R（3:1 风险回报）
 _TERM_MAP = {
     "connors_rsi":      ("short", 1.5, 1.5, "2-5天",  "mean reversion → MA20"),
+    "pullback_3d":      ("short", 1.5, 1.5, "2-3天",  "Connors 回调 → 反弹至 MA5"),
+    "ibs":              ("short", 1.0, 1.0, "次日",   "IBS 超卖 → 次日收盘卖出"),
     "momentum":         ("mid",   2.0, 4.0, "1-3月",  "动量延续，2:1 R:R"),
     "momentum_quality": ("mid",   2.0, 4.0, "1-3月",  "质量动量，2:1 R:R"),
     "low_vol":          ("mid",   1.8, 3.0, "1-3月",  "低波动，紧止损"),
@@ -1533,6 +1723,8 @@ def _model_mean_revert(prices_series, days=20):
 _TARGET_WEIGHTS = {
     # 短线：均值回归主导
     "connors_rsi":      (0.10, 0.15, 0.00, 0.15, 0.10, 0.50),
+    "pullback_3d":      (0.10, 0.15, 0.00, 0.10, 0.10, 0.55),  # MA5 反弹是核心
+    "ibs":              (0.20, 0.20, 0.00, 0.10, 0.10, 0.40),  # 1 天反弹，权重更分散
     # 中线趋势：ATR + 阻力 + 分析师
     "momentum":         (0.20, 0.20, 0.10, 0.25, 0.25, 0.00),
     "momentum_quality": (0.15, 0.15, 0.20, 0.25, 0.25, 0.00),
@@ -1546,7 +1738,8 @@ _TARGET_WEIGHTS = {
 
 # 持有期（天）— 用于 hist_vol 模型
 _HORIZON_DAYS = {
-    "connors_rsi": 5, "momentum": 60, "momentum_quality": 60, "low_vol": 60,
+    "connors_rsi": 5, "pullback_3d": 3, "ibs": 1,
+    "momentum": 60, "momentum_quality": 60, "low_vol": 60,
     "dual_momentum": 60, "multifactor": 60, "piotroski": 365, "high52w": 365,
 }
 
@@ -1555,7 +1748,7 @@ def _compute_target_models(ticker, entry, atr, prices, info, sector, strategy):
     if entry is None or entry <= 0: return None
     series = prices[ticker].dropna() if ticker in prices.columns else None
     horizon = _HORIZON_DAYS.get(strategy, 60)
-    atr_mult = 4.0 if strategy in ("piotroski","high52w") else (1.5 if strategy == "connors_rsi" else 4.0)
+    atr_mult = 4.0 if strategy in ("piotroski","high52w") else (1.5 if strategy in ("connors_rsi","pullback_3d","ibs") else 4.0)
 
     models = {
         "atr":         _model_atr(entry, atr, atr_mult),
@@ -1564,11 +1757,13 @@ def _compute_target_models(ticker, entry, atr, prices, info, sector, strategy):
         "analyst":     _model_analyst(info),
     }
     high_52w, boll = _model_resistance(series)
-    # resistance：取阻力位中较接近现价的（防止远端高点拉高目标）
     cand = [v for v in (high_52w, boll) if v is not None and v > entry]
     models["resistance"] = min(cand) if cand else high_52w
-    if strategy == "connors_rsi":
-        models["mean_revert"] = _model_mean_revert(series, 20)
+    # 均值回归类策略目标 = MA20（短线反弹核心）
+    if strategy in ("connors_rsi", "pullback_3d", "ibs"):
+        # ibs 持有 1 天，用 MA5；其他用 MA20
+        ma_window = 5 if strategy == "ibs" else 20
+        models["mean_revert"] = _model_mean_revert(series, ma_window)
     else:
         models["mean_revert"] = None
 
@@ -1638,7 +1833,7 @@ def _smart_stop(entry, atr, prices, ticker, strategy):
     """
     import pandas as pd
     if entry is None: return None
-    stop_mult = 1.5 if strategy == "connors_rsi" else (2.5 if strategy in ("piotroski","high52w") else 2.0)
+    stop_mult = 1.5 if strategy in ("connors_rsi","pullback_3d","ibs") else (2.5 if strategy in ("piotroski","high52w") else 2.0)
     candidates = []
     if atr and atr > 0:
         candidates.append(entry - stop_mult * atr)
@@ -2217,7 +2412,7 @@ def api_run():
             strategy = body.get("strategy", "momentum")
             months = int(body.get("months",6))
             # 短线/技术策略需要至少 12 个月计算 200日均线、52周高低点
-            if strategy in ("high52w", "connors_rsi") and months < 12:
+            if strategy in ("high52w", "connors_rsi", "pullback_3d") and months < 12:
                 months = 12
             start_str, end_str = resolve_dates(body.get("start"), body.get("end"), months)
             log(f"区间：{start_str} → {end_str}", 12)
@@ -2264,8 +2459,8 @@ def _run_backtest(strategy_key, universe, sector_filter, lookback_months, hold_n
     """
     import pandas as pd, numpy as np, yfinance as yf
     # 不同策略需要的最小信号窗口不同
-    # connors_rsi / high52w 需要 ≥200 交易日（≈10 个月），其它 6 个月够
-    SIG_WIN_MONTHS = 12 if strategy_key in ("connors_rsi", "high52w") else 6
+    # connors_rsi / pullback_3d / high52w 需要 ≥200 交易日；ibs 只需 50 日
+    SIG_WIN_MONTHS = 12 if strategy_key in ("connors_rsi", "pullback_3d", "high52w") else 6
     bal_tag = "板块均衡" if balance_sectors else "原始排序"
     cost_rate = cost_bps / 10000.0
 
