@@ -308,7 +308,10 @@ def calc_north_money(prices_map, meta, **kw):
     other = [r for r in rows if r not in valid]
     other.sort(key=lambda x: -(x.get("mom_mean") or -999))
     final = valid + other
-    df = pd.DataFrame(final)
+    df = pd.DataFrame(final) if final else pd.DataFrame(columns=[
+        "symbol","name","sector","index","price","total_ret","mom_mean","sharpe","max_dd",
+        "north_pct_now","north_chg_20d","north_chg_60d","north_score","rank"
+    ])
     df.insert(0, "rank", range(1, len(df) + 1))
     log("策略 1 完成", 98)
     return df
@@ -371,18 +374,29 @@ def calc_breakout(prices_map, meta, **kw):
 
     # 综合：突破 + 量比≥1.5 = 强信号
     for r in rows:
-        signal_strong = r["breakout"] and (r.get("vol_ratio") or 0) >= 1.5
-        signal_weak   = r["breakout"]
+        signal_strong = bool(r["breakout"]) and (r.get("vol_ratio") or 0) >= 1.5
+        signal_weak   = bool(r["breakout"])
         r["signal"]   = signal_strong
         r["watchlist"] = signal_weak
         r["score"] = (
             (3 if signal_strong else 1 if signal_weak else 0) * 30
-            + max(0, r["dist_high"]) * 2
-            + (r["vol_ratio"] or 0) * 5
+            + max(0.0, float(r.get("dist_high") or 0)) * 2
+            + (r.get("vol_ratio") or 0) * 5
         )
 
+    if not rows:
+        # 全部下载失败或数据不足 — 返回空 df 但带正确列结构
+        df = pd.DataFrame(columns=["symbol","name","sector","index","price","high_60",
+                                    "dist_high","breakout","vol_ratio","cum5","cum20","cum60",
+                                    "recent_limits","signal","watchlist","score","rank"])
+        log("策略 2 完成（无可用数据）", 98)
+        return df
+
     df = pd.DataFrame(rows)
-    df = df.sort_values(["signal", "watchlist", "score"], ascending=[False, False, False]).reset_index(drop=True)
+    # bool 列转 int 排序（避免 pandas 在 mixed-type 时报错）
+    df["_sig_n"]  = df["signal"].astype(int)
+    df["_watch_n"] = df["watchlist"].astype(int)
+    df = df.sort_values(["_sig_n", "_watch_n", "score"], ascending=[False, False, False]).drop(columns=["_sig_n","_watch_n"]).reset_index(drop=True)
     df.insert(0, "rank", range(1, len(df) + 1))
     log("策略 2 完成", 98)
     return df
@@ -406,6 +420,10 @@ def calc_momentum(prices_map, meta, **kw):
             "index": str(info.get("index", "")),
             **ps,
         })
+    if not rows:
+        df = pd.DataFrame(columns=["symbol","name","sector","index","price","total_ret","mom_mean","sharpe","max_dd","rank"])
+        log("策略 3 完成（无可用数据）", 98)
+        return df
     df = pd.DataFrame(rows).sort_values("mom_mean", ascending=False).reset_index(drop=True)
     df.insert(0, "rank", range(1, len(df) + 1))
     log("策略 3 完成", 98)
