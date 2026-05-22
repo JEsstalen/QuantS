@@ -1478,6 +1478,195 @@ def calc_ibs(prices, meta, start_str, end_str, _skip_external=False):
     return df
 
 
+# ─── 策略 11：PEAD（盈利后漂移延续）─────────────────────────────────────────
+# Bernard & Thomas 1989：财报后业绩超预期的股票，未来 60 天平均跑赢 5-8%
+# 至今 35+ 年的最稳定学术异象
+# 入场条件（必须全部满足）：
+#   1) 过去 30 天内出过财报
+#   2) EPS Surprise ≥ 5%（大幅超预期）
+#   3) 财报次日 gap up ≥ 2%
+#   4) 财报次日成交量 ≥ 20日均量 × 1.5
+# 持有期：60 天
+
+_pead_recent_cache: dict = {}   # ticker -> (ts, pead_data | None)
+
+def _fetch_pead_one(ticker, prices_df):
+    """单只股票 PEAD 检测。需要 prices_df 含 H/L/O/C/Volume（来自 prices param）"""
+    cached = _pead_recent_cache.get(ticker)
+    if cached and _time.time() - cached[0] < 12 * 3600:
+        return cached[1]
+    try:
+        import yfinance as yf, pandas as pd, numpy as np
+        # 5 秒超时拉财报历史
+        result = [None]
+        def _do():
+            try:
+                result[0] = yf.Ticker(ticker).get_earnings_dates(limit=4)
+            except: pass
+        import threading as _th
+        th = _th.Thread(target=_do, daemon=True)
+        th.start(); th.join(timeout=5)
+        ed = result[0]
+        if ed is None or ed.empty:
+            _pead_recent_cache[ticker] = (_time.time(), None)
+            return None
+
+        # 找过去 30 天内的财报（已发布的 = Reported EPS not NaN）
+        today_ts = pd.Timestamp.now(tz=ed.index.tz)
+        cutoff = today_ts - pd.Timedelta(days=30)
+        recent = ed[(ed.index >= cutoff) & (ed.index <= today_ts)]
+        recent = recent.dropna(subset=["Reported EPS"])
+        if recent.empty:
+            _pead_recent_cache[ticker] = (_time.time(), None)
+            return None
+
+        # 取最近一次财报
+        e_row = recent.iloc[0]
+        e_date = recent.index[0].tz_localize(None).normalize()
+        surprise_pct = float(e_row.get("Surprise(%)", 0)) if not pd.isna(e_row.get("Surprise(%)")) else 0
+        eps_est = float(e_row.get("EPS Estimate")) if not pd.isna(e_row.get("EPS Estimate")) else None
+        eps_act = float(e_row.get("Reported EPS")) if not pd.isna(e_row.get("Reported EPS")) else None
+
+        # 在 prices_df 中找财报次日数据（盘后报 → 次日 反应；盘前 → 当日）
+        # 简化：用财报日之后的第一个交易日
+        if prices_df is None or prices_df.empty:
+            return None
+
+        # prices_df 是 close-only DataFrame（来自 load_prices）；这里需要 H/L/O/C/V
+        # 用 yfinance 单只 history(30d) 拉完整数据
+        result2 = [None]
+        def _do2():
+            try:
+                result2[0] = yf.Ticker(ticker).history(period="30d", auto_adjust=True)
+            except: pass
+        th2 = _th.Thread(target=_do2, daemon=True)
+        th2.start(); th2.join(timeout=5)
+        hist = result2[0]
+        if hist is None or hist.empty:
+            _pead_recent_cache[ticker] = (_time.time(), None)
+            return None
+
+        # 找财报次日（财报日之后的第一个交易日）
+        hist.index = hist.index.tz_localize(None) if hist.index.tz else hist.index
+        post = hist[hist.index > e_date]
+        if post.empty:
+            _pead_recent_cache[ticker] = (_time.time(), None)
+            return None
+        next_day = post.iloc[0]
+
+        # gap up = (next_open - prior_close) / prior_close
+        prior = hist[hist.index <= e_date]
+        if prior.empty:
+            _pead_recent_cache[ticker] = (_time.time(), None)
+            return None
+        prior_close = float(prior.iloc[-1]["Close"])
+        next_open = float(next_day["Open"])
+        gap_pct = (next_open / prior_close - 1) * 100
+
+        # volume vs 20d avg
+        vol_20d = float(hist["Volume"].iloc[-21:-1].mean()) if len(hist) >= 21 else float(hist["Volume"].mean())
+        next_vol = float(next_day["Volume"])
+        vol_ratio = next_vol / vol_20d if vol_20d > 0 else None
+
+        # 财报后到现在的实际收益
+        last_close = float(hist["Close"].iloc[-1])
+        post_ret_pct = (last_close / prior_close - 1) * 100
+        days_since = int((today_ts.tz_localize(None).normalize() - e_date).days)
+
+        # 触发条件
+        signal = (surprise_pct >= 5.0
+                  and gap_pct >= 2.0
+                  and vol_ratio is not None and vol_ratio >= 1.5)
+        watchlist = (surprise_pct >= 3.0 and gap_pct >= 1.0)
+
+        data = {
+            "earnings_date":  str(e_date.date()),
+            "days_since_er":  days_since,
+            "eps_estimate":   round(eps_est, 3) if eps_est is not None else None,
+            "eps_actual":     round(eps_act, 3) if eps_act is not None else None,
+            "surprise_pct":   round(surprise_pct, 2),
+            "gap_pct":        round(gap_pct, 2),
+            "vol_ratio":      round(vol_ratio, 2) if vol_ratio else None,
+            "post_ret_pct":   round(post_ret_pct, 2),
+            "signal":         bool(signal),
+            "watchlist":      bool(watchlist),
+        }
+        _pead_recent_cache[ticker] = (_time.time(), data)
+        return data
+    except Exception:
+        _pead_recent_cache[ticker] = (_time.time(), None)
+        return None
+
+def calc_pead(prices, meta, start_str, end_str, _skip_external=False):
+    import pandas as pd
+    meta_idx = meta.set_index("Ticker")
+
+    if _skip_external:
+        # 回测模式：PEAD 重度依赖财报数据，无法回测，降级返回总收益排序
+        results = []
+        for ticker in prices.columns:
+            s = prices[ticker].dropna()
+            if s.empty: continue
+            monthly = prices[ticker].resample("ME").last().dropna()
+            total_ret = round(float(monthly.iloc[-1]/monthly.iloc[0]-1)*100,2) if len(monthly)>=2 else None
+            results.append({**_meta_info(meta_idx, ticker), "ticker": ticker,
+                           "price": round(float(s.iloc[-1]), 2),
+                           "total_ret": total_ret,
+                           "earnings_date": None, "days_since_er": None,
+                           "eps_estimate": None, "eps_actual": None,
+                           "surprise_pct": None, "gap_pct": None,
+                           "vol_ratio": None, "post_ret_pct": None,
+                           "signal": False, "watchlist": False})
+        df = pd.DataFrame(results)
+        if not df.empty:
+            df = df.sort_values("total_ret", ascending=False, na_position="last").reset_index(drop=True)
+        df.insert(0, "rank", range(1, len(df)+1)) if not df.empty else None
+        log("计算完成（回测降级）", 100)
+        return df
+
+    # 实盘模式：并发拉每只股票财报
+    log(f"PEAD：扫描 {len(prices.columns)} 只股票的近期财报…", 60)
+    results = []
+    tickers = list(prices.columns)
+    done = [0]
+    n = len(tickers)
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        futs = {ex.submit(_fetch_pead_one, t, prices): t for t in tickers}
+        for f in as_completed(futs):
+            done[0] += 1
+            if done[0] % 25 == 0 or done[0] == n:
+                log(f"PEAD {done[0]}/{n}…", 60 + int(done[0]/n*35))
+            try:
+                ticker = futs[f]
+                d = f.result()
+                if d is None: continue   # 过去 30 天无财报，跳过
+                s = prices[ticker].dropna()
+                price = round(float(s.iloc[-1]), 2) if not s.empty else None
+                results.append({
+                    **_meta_info(meta_idx, ticker),
+                    "ticker": ticker, "price": price,
+                    **d,
+                })
+            except: pass
+
+    df = pd.DataFrame(results)
+    if df.empty:
+        df = pd.DataFrame(columns=["rank","ticker","name","sector","index","price",
+                                    "earnings_date","days_since_er","eps_estimate","eps_actual",
+                                    "surprise_pct","gap_pct","vol_ratio","post_ret_pct",
+                                    "signal","watchlist"])
+        log("计算完成（无近期财报）", 100)
+        return df
+
+    # 排序：signal > watchlist > 其他；同档按 surprise_pct 降序
+    df["_b"] = df.apply(lambda r: 2 if r["signal"] else 1 if r["watchlist"] else 0, axis=1)
+    df["_s"] = df["surprise_pct"].fillna(-999)
+    df = df.sort_values(["_b", "_s"], ascending=[False, False]).drop(columns=["_b","_s"]).reset_index(drop=True)
+    df.insert(0, "rank", range(1, len(df)+1))
+    log("计算完成", 100)
+    return df
+
+
 STRATEGIES = {
     "momentum":         calc_momentum,
     "momentum_quality": calc_momentum_quality,
@@ -1489,6 +1678,7 @@ STRATEGIES = {
     "connors_rsi":      calc_connors_rsi,
     "pullback_3d":      calc_pullback_3d,
     "ibs":              calc_ibs,
+    "pead":             calc_pead,
 }
 
 # ─── 目标价 / 止损测算（前10名）─────────────────────────────────────────────
@@ -1505,6 +1695,7 @@ _TERM_MAP = {
     "low_vol":          ("mid",   1.8, 3.0, "1-3月",  "低波动，紧止损"),
     "dual_momentum":    ("mid",   2.0, 4.0, "1-3月",  "双动量，2:1 R:R"),
     "multifactor":      ("mid",   2.0, 4.0, "1-3月",  "多因子，2:1 R:R"),
+    "pead":             ("mid",   2.0, 5.0, "60天",   "PEAD 漂移，2.5:1 R:R"),
     "piotroski":        ("long",  2.5, 7.5, "6-18月", "基本面长线，3:1 R:R"),
     "high52w":          ("long",  2.5, 7.5, "6-18月", "52W动量长线，3:1 R:R"),
 }
@@ -1731,6 +1922,7 @@ _TARGET_WEIGHTS = {
     "low_vol":          (0.25, 0.25, 0.10, 0.20, 0.20, 0.00),
     "dual_momentum":    (0.20, 0.20, 0.10, 0.25, 0.25, 0.00),
     "multifactor":      (0.15, 0.20, 0.15, 0.25, 0.25, 0.00),
+    "pead":             (0.20, 0.20, 0.05, 0.30, 0.25, 0.00),  # 分析师权重高，事件驱动短中期
     # 长线：PE + 分析师主导
     "piotroski":        (0.10, 0.10, 0.40, 0.30, 0.10, 0.00),
     "high52w":          (0.15, 0.15, 0.20, 0.25, 0.25, 0.00),
@@ -1740,7 +1932,8 @@ _TARGET_WEIGHTS = {
 _HORIZON_DAYS = {
     "connors_rsi": 5, "pullback_3d": 3, "ibs": 1,
     "momentum": 60, "momentum_quality": 60, "low_vol": 60,
-    "dual_momentum": 60, "multifactor": 60, "piotroski": 365, "high52w": 365,
+    "dual_momentum": 60, "multifactor": 60, "pead": 60,
+    "piotroski": 365, "high52w": 365,
 }
 
 def _compute_target_models(ticker, entry, atr, prices, info, sector, strategy):
@@ -2158,12 +2351,31 @@ def _diagnose_top10(df, prices):
     elif avg_corr is not None and avg_corr > 0.5:
         warnings_list.append(f"近60日平均相关性 {avg_corr}，分散效果一般")
 
+    # 组合层面 VaR（等权前10只 1天 95% VaR）
+    # 用 60日协方差 + 等权 → portfolio σ → VaR
+    portfolio_var_pct = None
+    portfolio_vol_pct = None
+    try:
+        cov = daily.cov()
+        weights = np.ones(n) / n
+        port_var_daily = float(weights @ cov.values @ weights)   # 日收益方差
+        port_sigma = (port_var_daily ** 0.5) * 100               # 日收益σ in %
+        portfolio_vol_pct = round(port_sigma, 2)
+        # 95% VaR (1 day) 假设正态分布：1.645σ
+        portfolio_var_pct = round(1.645 * port_sigma, 2)
+        if portfolio_var_pct > 5:
+            warnings_list.append(f"⚠ 组合 1日 95% VaR = {portfolio_var_pct}%，单日下行风险偏高（>5%）")
+    except Exception:
+        pass
+
     return {
         "tickers":      tickers,
         "matrix":       matrix,
         "avg_corr":     avg_corr,
         "sector_bars":  sector_bars,
         "warnings":     warnings_list,
+        "portfolio_vol_pct": portfolio_vol_pct,   # 等权前10日波动率%
+        "portfolio_var_pct": portfolio_var_pct,   # 1日 95% VaR %
     }
 
 def _fetch_news_count(ticker, days=14):
@@ -2624,6 +2836,95 @@ def _run_backtest(strategy_key, universe, sector_filter, lookback_months, hold_n
     }
 
 _backtest_lock = threading.Lock()
+
+# ─── 凯利仓位（基于回测胜率 + 盈亏比）────────────────────────────────────────
+# Kelly% = win_rate - loss_rate / payoff_ratio
+# 半凯利 = Kelly / 2（实战推荐，降低破产风险）
+# 1% 法则 = 固定 1%（最保守）
+
+@app.route("/api/kelly", methods=["GET"])
+def api_kelly():
+    """根据策略的回测缓存返回三档仓位建议
+    需要先跑过该策略的回测才有数据
+    """
+    strategy = request.args.get("strategy", "momentum")
+    universe = request.args.get("universe", "nasdaq100")
+    sector_filter = request.args.get("sector_filter", "")
+    lookback = int(request.args.get("lookback_months", 24))
+    hold_n   = int(request.args.get("hold_n", 10))
+    cost_bps = int(request.args.get("cost_bps", 10))
+    balance  = int(request.args.get("balance_sectors", 0))
+
+    # 找回测缓存（与 api_backtest 同 key 规则）
+    key = f"{strategy}|{universe}|{sector_filter}|{lookback}|{hold_n}|{cost_bps}|{balance}"
+    import time as _t
+    entry = _backtest_cache.get(key)
+
+    if not entry or _t.time() - entry[0] > _BACKTEST_TTL:
+        return jsonify({
+            "available": False,
+            "msg": "尚无该策略的回测数据。请先在「回测」窗口跑一次相同参数的回测，或选择 1% 保守仓位。",
+            "fallback_pct": 1.0,
+        })
+
+    result = entry[1]
+    stats = result.get("stats", {})
+    win_rate = stats.get("win_rate", 0) / 100  # 转 0-1
+    wins = stats.get("wins", 0)
+    losses = stats.get("losses", 0)
+    trades = wins + losses
+
+    if trades < 12:
+        return jsonify({
+            "available": False,
+            "msg": f"回测只有 {trades} 笔交易，样本不足以估算凯利（需 ≥12 笔）。建议用 1% 保守仓位。",
+            "fallback_pct": 1.0,
+        })
+
+    # 估算盈亏比：用 history 里月度收益均值近似
+    history = result.get("history", [])
+    win_returns = [h["ret"] for h in history if h.get("ret", 0) > 0]
+    loss_returns = [h["ret"] for h in history if h.get("ret", 0) < 0]
+
+    if not win_returns or not loss_returns:
+        return jsonify({
+            "available": False,
+            "msg": "胜负记录单边（全胜或全败），无法估算盈亏比。",
+            "fallback_pct": 1.0,
+        })
+
+    avg_win = sum(win_returns) / len(win_returns)
+    avg_loss = abs(sum(loss_returns) / len(loss_returns))
+    payoff = avg_win / avg_loss if avg_loss > 0 else None
+    if payoff is None or payoff <= 0:
+        return jsonify({
+            "available": False,
+            "msg": "盈亏比无效。",
+            "fallback_pct": 1.0,
+        })
+
+    # 凯利公式
+    loss_rate = 1 - win_rate
+    kelly_pct = win_rate - loss_rate / payoff
+    kelly_pct = max(0, kelly_pct)  # 负凯利 = 不应该交易，但仍返回 0
+
+    # 输出
+    return jsonify({
+        "available": True,
+        "win_rate":      round(win_rate * 100, 1),
+        "trades":        trades,
+        "avg_win":       round(avg_win, 2),
+        "avg_loss":      round(avg_loss, 2),
+        "payoff_ratio":  round(payoff, 2),
+        "kelly_pct":     round(kelly_pct * 100, 2),
+        "half_kelly_pct":round(kelly_pct * 50, 2),
+        "fallback_pct":  1.0,
+        "warning": (
+            "凯利仓位过大，建议用半凯利或 1% 保守仓位" if kelly_pct > 0.25
+            else "策略回测期望负收益，不建议建仓" if kelly_pct <= 0
+            else None
+        ),
+    })
 
 @app.route("/api/backtest", methods=["POST"])
 def api_backtest():

@@ -400,6 +400,10 @@ tr.selected td:first-child{border-left:2px solid var(--accent);padding-left:10px
 .sizer-row input{width:80px;border:1px solid var(--border);background:var(--surface);padding:3px 7px;border-radius:4px;font-size:12px;font-variant-numeric:tabular-nums;outline:none;height:24px}
 .sizer-result{background:rgba(37,99,235,.06);border:1px solid rgba(37,99,235,.2);border-radius:5px;padding:8px 10px;display:flex;justify-content:space-between;align-items:baseline;font-size:12px}
 .sizer-result b{font-size:20px;color:var(--accent);font-variant-numeric:tabular-nums}
+.sizer-mode{height:22px;padding:0 8px;border:1px solid var(--border);background:var(--surface);
+color:var(--text2);font-size:10px;font-weight:600;cursor:pointer;border-radius:3px}
+.sizer-mode:hover{border-color:var(--accent);color:var(--accent)}
+.sizer-mode.active{background:var(--accent);color:#fff;border-color:var(--accent)}
 /* analyst compare */
 .analyst-compare{background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:7px 10px;margin-top:8px;font-size:11px;display:flex;justify-content:space-between;align-items:center}
 .liq-low{background:rgba(220,38,38,.12);color:#b91c1c;font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;border:1px solid rgba(220,38,38,.3)}
@@ -581,6 +585,9 @@ tr.selected td:first-child{border-left:2px solid var(--accent);padding-left:10px
     </button>
     <button class="stab" id="stab-multifactor" onclick="setStrategy('multifactor')">
       🧮 多因子 <span class="stab-badge">Z-Score</span>
+    </button>
+    <button class="stab" id="stab-pead" onclick="setStrategy('pead')">
+      📰 PEAD <span class="stab-badge">财报漂移 35年异象</span>
     </button>
     <span class="term-sep"></span>
     <span class="term-label term-long">长线 · 6-18月</span>
@@ -775,6 +782,11 @@ const STRAT_META = {
     sortKey: "mf_score", sortAsc: false,
     cols: ["rank","score_total","moat_tier","ticker","sector","price","mf_score","mom_mean","roe","profit_margin","beta","ps","short_float","inst_hold","target","stop","risk_reward","horizon","atr","dollar_vol_20d","earnings_date"],
   },
+  pead: {
+    desc: "PEAD · Bernard & Thomas 1989 学术异象：财报后业绩超预期(+5%) + gap up(+2%) + 量能(1.5×) → 60 天平均超额 5-8%。最稳定的事件驱动策略",
+    sortKey: "rank", sortAsc: true,
+    cols: ["rank","score_total","moat_tier","ticker","sector","price","signal","earnings_date","days_since_er","surprise_pct","gap_pct","vol_ratio","post_ret_pct","target","stop","risk_reward","horizon","atr","dollar_vol_20d"],
+  },
   high52w: {
     desc: "George & Hwang 2004（JoF）：距52周高点越近的股票未来半年至一年持续走强；双重过滤=200日均线之上+正向月动量",
     sortKey: "dist_high", sortAsc: false,
@@ -901,6 +913,28 @@ const COL_DEF = {
   high:          { label:'当日高',      fmt:(v)=>v!=null?`<span class="num neu">$${v}</span>`:'—' },
   low:           { label:'当日低',      fmt:(v)=>v!=null?`<span class="num neu">$${v}</span>`:'—' },
   ma50:          { label:'MA50',        fmt:(v)=>v!=null?`<span class="num neu">$${v}</span>`:'—' },
+  // PEAD
+  days_since_er: { label:'距财报',       fmt:(v)=>{
+    if (v==null) return '—';
+    const c = v<=7?'pos':v<=14?'neu':'';
+    return `<span class="num ${c}">${v}天</span>`;
+  }},
+  surprise_pct:  { label:'EPS超预期',    fmt:(v)=>{
+    if (v==null) return '—';
+    const c = v>=10?'pos':v>=5?'pos':v>0?'neu':'neg';
+    const wt = v>=5?'700':'500';
+    return `<span class="num ${c}" style="font-weight:${wt}">${v>0?'+':''}${v}%</span>`;
+  }},
+  gap_pct:       { label:'财报次日Gap',  fmt:(v)=>{
+    if (v==null) return '—';
+    const c = v>=2?'pos':v>0?'neu':'neg';
+    return `<span class="num ${c}">${v>0?'+':''}${v}%</span>`;
+  }},
+  post_ret_pct:  { label:'报后涨幅',     fmt:(v)=>{
+    if (v==null) return '—';
+    const c = v>=0?'pos':'neg';
+    return `<span class="num ${c}">${v>0?'+':''}${v}%</span>`;
+  }},
   // 目标价/止损（仅前10名）
   target:       { label:'目标(低/中/高)', fmt:(v,r)=>{
     if(v==null) return '<span class="neu">—</span>';
@@ -2031,11 +2065,24 @@ function renderDiagnostics(d) {
   panel.innerHTML = `
     <div class="diag-panel">
       <div class="diag-header">
-        <span class="diag-title">前10诊断 · 集中度 & 相关性</span>
+        <span class="diag-title">前10诊断 · 集中度 / 相关性 / 组合风险</span>
         <button class="diag-toggle" onclick="toggleDiag()">${_diagCollapsed?'展开 ▼':'收起 ▲'}</button>
       </div>
       ${_diagCollapsed?'':`
         ${warnHtml ? `<div style="display:flex;flex-direction:column;gap:5px">${warnHtml}</div>`:''}
+        ${d.portfolio_var_pct != null ? `
+        <div style="display:flex;gap:10px;padding:8px 10px;background:linear-gradient(135deg,rgba(220,38,38,.04),rgba(217,119,6,.04));border:1px solid var(--border);border-radius:6px">
+          <div style="flex:1">
+            <div style="font-size:10px;color:var(--text3);font-weight:700;text-transform:uppercase">组合 1日 95% VaR（等权前10）</div>
+            <div style="font-size:18px;font-weight:800;color:${d.portfolio_var_pct>5?'var(--red)':d.portfolio_var_pct>3?'var(--amber)':'var(--green)'};font-variant-numeric:tabular-nums">-${d.portfolio_var_pct}%</div>
+            <div style="font-size:10px;color:var(--text3);margin-top:1px">即 95% 概率下单日下跌不超过此值</div>
+          </div>
+          <div style="flex:1;border-left:1px solid var(--border);padding-left:10px">
+            <div style="font-size:10px;color:var(--text3);font-weight:700;text-transform:uppercase">组合日波动率 σ</div>
+            <div style="font-size:18px;font-weight:800;color:var(--text);font-variant-numeric:tabular-nums">${d.portfolio_vol_pct}%</div>
+            <div style="font-size:10px;color:var(--text3);margin-top:1px">$10万账户日波动约 $${(d.portfolio_vol_pct * 1000).toFixed(0)}</div>
+          </div>
+        </div>` : ''}
         <div class="diag-body">
           <div>
             <div class="diag-section-title">
@@ -2407,12 +2454,20 @@ function renderDetail({info,prices}, row) {
         </div>
       </details>
       <div class="sizer-box">
-        <div style="font-size:11px;font-weight:700;color:var(--text2)">💰 仓位计算（1% 法则）</div>
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div style="font-size:11px;font-weight:700;color:var(--text2)">💰 仓位计算</div>
+          <div style="display:flex;gap:2px">
+            <button class="sizer-mode active" data-mode="risk" onclick="setSizerMode('${row.ticker}','risk')" title="1% 风险法则（最保守）">1%法则</button>
+            <button class="sizer-mode" data-mode="halfk" onclick="setSizerMode('${row.ticker}','halfk')" title="基于该策略回测的半凯利仓位（推荐）">半凯利</button>
+            <button class="sizer-mode" data-mode="kelly" onclick="setSizerMode('${row.ticker}','kelly')" title="全凯利（仅当历史回测充足时）">凯利</button>
+          </div>
+        </div>
         <div class="sizer-row">
           账户 $<input id="sizerAcct" type="number" value="100000" oninput="computeSize('${row.ticker}')">
-          单笔风险 <input id="sizerRisk" type="number" value="1" step="0.5" oninput="computeSize('${row.ticker}')">%
+          <span id="sizerRiskLabel">单笔风险</span> <input id="sizerRisk" type="number" value="1" step="0.5" oninput="computeSize('${row.ticker}')">%
         </div>
         <div class="sizer-result" id="sizerOut"><span>调整账户/风险查看</span><b>—</b></div>
+        <div id="kellyInfo" style="display:none;font-size:10px;color:var(--text3);padding:4px 8px;background:rgba(37,99,235,.04);border-radius:4px;line-height:1.5"></div>
       </div>
       <button onclick="addCurrentToWatchlist()" style="width:100%;margin-top:8px;padding:7px;border-radius:5px;border:1px solid var(--accent);background:#fff;color:var(--accent);font-weight:700;cursor:pointer;font-size:12px">📌 加入自选（含止损/目标）</button>`;
   }
@@ -3349,19 +3404,84 @@ setTimeout(_hookConsensusSSE, 500);
 setTimeout(loadSettings, 100);
 
 // ── position sizer (used inside detail panel) ────────────────────────────────
+let _sizerMode = 'risk';   // 'risk' | 'kelly' | 'halfk'
+let _kellyData = null;
+
+async function setSizerMode(ticker, mode) {
+  _sizerMode = mode;
+  document.querySelectorAll('.sizer-mode').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+  const info = document.getElementById('kellyInfo');
+  const label = document.getElementById('sizerRiskLabel');
+  const riskInput = document.getElementById('sizerRisk');
+
+  if (mode === 'risk') {
+    label.textContent = '单笔风险';
+    if (info) info.style.display = 'none';
+    if (!riskInput.value || riskInput.value === '0') riskInput.value = '1';
+  } else {
+    // 拉凯利数据
+    label.textContent = '仓位';
+    if (info) {
+      info.style.display = 'block';
+      info.textContent = '加载策略回测数据中…';
+    }
+    try {
+      const params = new URLSearchParams({
+        strategy,
+        universe:        document.getElementById('universe')?.value || 'nasdaq100',
+        sector_filter:   document.getElementById('sector_filter')?.value || '',
+        lookback_months: 24,
+        cost_bps:        10,
+        balance_sectors: balanceSectorsOn ? 1 : 0,
+      });
+      const r = await fetch('/api/kelly?' + params);
+      const d = await r.json();
+      _kellyData = d;
+      if (!d.available) {
+        info.innerHTML = `⚠ ${esc(d.msg)} <button onclick="setSizerMode('${ticker}','risk')" style="font-size:10px;padding:2px 6px;border-radius:3px;border:1px solid var(--border);background:#fff;cursor:pointer;margin-left:4px">回到 1%</button>`;
+        riskInput.value = d.fallback_pct || 1;
+      } else {
+        const pct = mode === 'halfk' ? d.half_kelly_pct : d.kelly_pct;
+        riskInput.value = pct.toFixed(1);
+        let warningHtml = '';
+        if (d.warning) warningHtml = `<div style="color:var(--amber);font-weight:700;margin-top:3px">⚠ ${esc(d.warning)}</div>`;
+        info.innerHTML = `胜率 <b>${d.win_rate}%</b> · 盈亏比 <b>${d.payoff_ratio}:1</b> · ${d.trades} 笔交易<br/>
+          凯利 <b style="color:var(--accent)">${d.kelly_pct}%</b> · 半凯利 <b style="color:var(--green)">${d.half_kelly_pct}%</b>
+          ${warningHtml}`;
+      }
+    } catch(e) {
+      info.textContent = '加载失败：' + e.message;
+    }
+  }
+  computeSize(ticker);
+}
+
 function computeSize(ticker) {
   const acct = parseFloat(document.getElementById('sizerAcct')?.value || 100000);
-  const risk = parseFloat(document.getElementById('sizerRisk')?.value || 1);
+  const pctInput = parseFloat(document.getElementById('sizerRisk')?.value || 1);
   const row = allRows.find(r=>r.ticker===ticker);
-  if (!row || row.price==null || row.stop==null) return;
-  const riskUSD = acct * risk / 100;
-  const perShareRisk = row.price - row.stop;
-  if (perShareRisk <= 0) return;
-  const shares = Math.floor(riskUSD / perShareRisk);
-  const positionUSD = shares * row.price;
+  if (!row || row.price==null) return;
+
+  let shares, positionUSD, mode_desc;
+  if (_sizerMode === 'risk') {
+    if (row.stop == null) return;
+    // 1% 法则：仓位 = (账户 × 风险%) / 每股风险
+    const riskUSD = acct * pctInput / 100;
+    const perShareRisk = row.price - row.stop;
+    if (perShareRisk <= 0) return;
+    shares = Math.floor(riskUSD / perShareRisk);
+    positionUSD = shares * row.price;
+    mode_desc = `单笔风险 ${pctInput}%`;
+  } else {
+    // 凯利模式：仓位 = 账户 × pctInput% (整笔仓位百分比)
+    positionUSD = acct * pctInput / 100;
+    shares = Math.floor(positionUSD / row.price);
+    positionUSD = shares * row.price;
+    mode_desc = _sizerMode === 'halfk' ? '半凯利仓位' : '凯利仓位';
+  }
   const positionPct = (positionUSD / acct * 100).toFixed(1);
   document.getElementById('sizerOut').innerHTML =
-    `<span>${shares} 股 ≈ $${positionUSD.toLocaleString(undefined,{maximumFractionDigits:0})} (${positionPct}% 账户)</span><b>${shares}</b>`;
+    `<span>${mode_desc}：${shares} 股 ≈ $${positionUSD.toLocaleString(undefined,{maximumFractionDigits:0})} (${positionPct}% 账户)</span><b>${shares}</b>`;
 }
 
 // ── add-to-watchlist from detail panel ────────────────────────────────────────
